@@ -7,8 +7,11 @@ NAICS, tickers, etc.) at once — faster and more reliable than web scraping.
 """
 
 import json
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _MAX_CODES_TO_LOOKUP = 30
@@ -78,8 +81,8 @@ def _api_lookup_ndc(value: str) -> str:
         name = d.get("ndcStatus", {}).get("conceptName", "")
         if name:
             return name.title()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("NDC code lookup failed for %r: %s", value, e)
     return ""
 
 
@@ -92,8 +95,8 @@ def _api_lookup_icd(value: str) -> str:
         )
         if d and len(d) >= 4 and d[3]:
             return d[3][0][1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("ICD-10 code lookup failed for %r: %s", value, e)
     return ""
 
 
@@ -106,8 +109,8 @@ def _api_lookup_cpt(value: str) -> str:
         )
         if d and len(d) >= 4 and d[3]:
             return d[3][0][1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("CPT/HCPCS code lookup failed for %r: %s", value, e)
     return ""
 
 #: ddgs currently NOT used in this project, keeping for backward compatibility.

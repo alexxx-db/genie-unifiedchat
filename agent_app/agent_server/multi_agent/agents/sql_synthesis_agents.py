@@ -693,6 +693,10 @@ class SQLSynthesisGenieAgent:
                     # Extract conversation_id
                     extracted["conversation_id"] = result.get("conversation_id", "")
 
+                    # A narrative/answer-only Genie result (no query_sql message)
+                    # is still a successful contribution, so key success off both.
+                    extracted["success"] = bool(extracted["sql"] or extracted["answer"])
+
                 # Handle direct dict output from StructuredTool (the common case).
                 # Also covers isolated per-task error dicts, which carry no SQL or
                 # answer and are therefore marked success=False here.
@@ -770,9 +774,22 @@ class SQLSynthesisGenieAgent:
                 
                 # Invoke the composed chain
                 results = composed.invoke(route_plan)
-                
+
+                # Per-task isolation means a total outage no longer raises. If
+                # EVERY space failed, surface an explicit error rather than
+                # returning success=False rows that downstream reads as "no data".
+                space_results = [
+                    v for v in results.values()
+                    if isinstance(v, dict) and "success" in v
+                ]
+                if space_results and all(not v.get("success") for v in space_results):
+                    errors = "; ".join(
+                        str(v.get("error") or "unknown error") for v in space_results
+                    )
+                    return {"error": f"All parallel Genie tasks failed: {errors}"}
+
                 return results
-                
+
             except Exception as e:
                 return {"error": f"Parallel execution failed: {str(e)}"}
         

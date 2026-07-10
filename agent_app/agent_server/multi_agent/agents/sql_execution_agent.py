@@ -64,11 +64,18 @@ def _is_read_only_sql(sql: str) -> Tuple[bool, str]:
     if not stripped:
         return False, "empty SQL"
 
-    read_only_types = (exp.Select, exp.Union, exp.Subquery, exp.With, exp.Describe)
+    # exp.SetOperation is the base of Union/Intersect/Except in sqlglot 30.x
+    # (Intersect/Except do NOT subclass Union). exp.Use / exp.Set are session
+    # context, not data mutations, so leading USE/SET before a query is allowed.
+    set_op = getattr(exp, "SetOperation", exp.Union)
+    read_only_types = (
+        exp.Select, set_op, exp.Union, exp.Subquery, exp.With,
+        exp.Describe, exp.Use, exp.Set,
+    )
     write_keywords = {
         "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT",
         "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE",
-        "COPY", "CALL", "SET", "USE", "REFRESH", "OPTIMIZE", "VACUUM",
+        "COPY", "CALL", "REFRESH", "OPTIMIZE", "VACUUM",
     }
 
     try:
@@ -90,13 +97,40 @@ def _is_read_only_sql(sql: str) -> Tuple[bool, str]:
             return False, f"non-read-only statement: {type(stmt).__name__}"
         return True, ""
 
-    # Parsing failed — fall back to a first-keyword denylist so we fail closed.
+    # Parsing failed — fail closed. Reject if ANY write keyword appears as a
+    # standalone token (catches e.g. `WITH ... INSERT ...` where a leading read
+    # keyword would otherwise mask a trailing mutation), and only allow when the
+    # statement clearly begins with a read verb.
+    tokens = {t.upper() for t in re.findall(r"[A-Za-z_]+", stripped)}
+    hit = tokens & write_keywords
+    if hit:
+        return False, f"non-read-only statement: {sorted(hit)[0]}"
     first_word = re.sub(r"^[\s(]*", "", stripped).split(None, 1)[0].upper() if stripped else ""
-    if first_word in write_keywords:
-        return False, f"non-read-only statement: {first_word}"
     if first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM") or first_word in _READ_ONLY_COMMAND_PREFIXES:
         return True, ""
     return False, f"could not verify statement is read-only (starts with {first_word or 'nothing'})"
+
+
+def _is_limitable_sql(sql: str) -> bool:
+    """
+    True only when it is safe to append a trailing ``LIMIT`` — i.e. the final
+    statement is a row-returning query. SHOW/DESCRIBE/EXPLAIN/USE/SET do not
+    accept a trailing LIMIT and would become invalid SQL.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    set_op = getattr(exp, "SetOperation", exp.Union)
+    query_types = (exp.Select, set_op, exp.Union, exp.Subquery, exp.With)
+    try:
+        statements = [s for s in sqlglot.parse(sql, read="databricks") if s]
+    except Exception:
+        statements = None
+    if statements:
+        return isinstance(statements[-1], query_types)
+    # Parse failed: only append LIMIT for clearly query-shaped SQL.
+    first_word = re.sub(r"^[\s(]*", "", sql.strip()).split(None, 1)[0].upper() if sql.strip() else ""
+    return first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM")
 
 
 class SQLExecutionAgent:
@@ -292,7 +326,9 @@ class SQLExecutionAgent:
             if existing_limit > max_rows:
                 extracted_sql = extracted_sql[:trailing_limit.start()] + f' LIMIT {max_rows}' + extracted_sql[trailing_limit.end():]
                 print(f"⚠️  Reduced trailing LIMIT from {existing_limit} to {max_rows} (max_rows enforcement)")
-        else:
+        elif _is_limitable_sql(extracted_sql):
+            # Only append LIMIT to row-returning queries. Appending it to
+            # SHOW/DESCRIBE/EXPLAIN/USE/SET would produce invalid SQL.
             extracted_sql = f"{extracted_sql.rstrip(';')} LIMIT {max_rows}"
         
         try:
