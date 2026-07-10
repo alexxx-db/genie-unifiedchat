@@ -29,13 +29,13 @@ Example usage:
 """
 
 import json
+import logging
 import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
-from uuid import uuid4
 
 from langchain_core.messages import SystemMessage
 from langgraph.config import get_stream_writer
@@ -43,25 +43,16 @@ from langgraph.config import get_stream_writer
 from ..core.state import AgentState
 
 
-_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+logger = logging.getLogger(__name__)
 
 
 def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
-    try:
-        payload = {
-            "sessionId": "5f14c7",
-            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "runId": "run1",
-            "hypothesisId": "route-debug",
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
+    """Emit routing/planning debug info via the standard logger.
+
+    Previously this wrote to a hard-coded developer path on every call, which
+    leaked routing data locally and silently failed everywhere else.
+    """
+    logger.debug("%s | %s | %s", location, message, data or {})
 
 
 # ==============================================================================

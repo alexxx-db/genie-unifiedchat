@@ -662,43 +662,24 @@ class SQLSynthesisGenieAgent:
                     "reasoning": "",
                     "answer": "",
                     "conversation_id": "",
+                    "error": "",
                     "success": False
                 }
-                
-                # Handle direct dict output from StructuredTool
+
+                # Every value from _safe_invoke is a plain dict: either the
+                # _genie_tool_call result ({conversation_id, answer, [reasoning],
+                # [sql]}) or a per-task error dict ({space_id, success, error}).
+                # Neither carries a raw `messages` key, so there is no
+                # message-parsing branch. The error is preserved so the
+                # all-failed aggregation can report each task's real cause.
                 if isinstance(result, dict):
                     extracted["answer"] = result.get("answer", "")
                     extracted["sql"] = result.get("sql", "")
                     extracted["reasoning"] = result.get("reasoning", "")
                     extracted["conversation_id"] = result.get("conversation_id", "")
+                    extracted["error"] = result.get("error", "")
                     extracted["success"] = bool(result.get("sql") or result.get("answer"))
-                
-                # Handle message-based output (fallback)
-                elif isinstance(result, dict) and "messages" in result:
-                    messages = result.get("messages", [])
-                    
-                    # Extract reasoning (query_reasoning)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_reasoning':
-                            extracted["reasoning"] = msg.content if hasattr(msg, 'content') else ""
-                            break
-                    
-                    # Extract SQL (query_sql)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_sql':
-                            extracted["sql"] = msg.content if hasattr(msg, 'content') else ""
-                            extracted["success"] = True
-                            break
-                    
-                    # Extract answer (query_result)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_result':
-                            extracted["answer"] = msg.content if hasattr(msg, 'content') else ""
-                            break
-                    
-                    # Extract conversation_id
-                    extracted["conversation_id"] = result.get("conversation_id", "")
-                
+
                 merged_results[space_id] = extracted
             
             return merged_results
@@ -740,11 +721,27 @@ class SQLSynthesisGenieAgent:
                 for space_id, question in route_plan.items():
                     tool = space_id_to_tool[space_id]
                     ctx = contextvars.copy_context()
-                    parallel_tasks[space_id] = RunnableLambda(
-                        lambda inp, sid=space_id, t=tool, c=ctx: c.run(
-                            t.func, question=inp[sid], conversation_id=None
-                        )
-                    )
+
+                    # Isolate each Genie call: a failure in one space must not
+                    # abort the whole batch. RunnableParallel re-raises the first
+                    # branch exception, which previously discarded every
+                    # successful result. Catch per-task and return an error dict
+                    # (merge_genie_outputs marks it success=False).
+                    def _safe_invoke(inp, sid=space_id, t=tool, c=ctx):
+                        try:
+                            q = inp.get(sid, "")
+                            out = c.run(t.func, question=q, conversation_id=None)
+                            if isinstance(out, dict):
+                                return {"question": q, **out}
+                            return {"question": q, "answer": str(out)}
+                        except Exception as task_err:  # noqa: BLE001
+                            return {
+                                "space_id": sid,
+                                "question": inp.get(sid, ""),
+                                "success": False,
+                                "error": f"Genie call failed for {sid}: {task_err}",
+                            }
+                    parallel_tasks[space_id] = RunnableLambda(_safe_invoke)
                 
                 # Create parallel runner and compose with merge function
                 parallel = RunnableParallel(**parallel_tasks)
@@ -752,9 +749,22 @@ class SQLSynthesisGenieAgent:
                 
                 # Invoke the composed chain
                 results = composed.invoke(route_plan)
-                
+
+                # Per-task isolation means a total outage no longer raises. If
+                # EVERY space failed, surface an explicit error rather than
+                # returning success=False rows that downstream reads as "no data".
+                space_results = [
+                    v for v in results.values()
+                    if isinstance(v, dict) and "success" in v
+                ]
+                if space_results and all(not v.get("success") for v in space_results):
+                    errors = "; ".join(
+                        str(v.get("error") or "unknown error") for v in space_results
+                    )
+                    return {"error": f"All parallel Genie tasks failed: {errors}"}
+
                 return results
-                
+
             except Exception as e:
                 return {"error": f"Parallel execution failed: {str(e)}"}
         

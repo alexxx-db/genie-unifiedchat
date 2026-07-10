@@ -5,6 +5,7 @@ This module defines the graph structure, routing logic, and workflow compilation
 """
 
 import json
+import logging
 from functools import wraps
 from typing import Any, Callable, Optional, Union
 
@@ -12,6 +13,8 @@ import mlflow
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from mlflow.entities import SpanType
+
+logger = logging.getLogger(__name__)
 
 from ..core.state import AgentState
 from ..agents.clarification import ClarificationAgent
@@ -244,9 +247,7 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
         warehouse_id=config.table_metadata.sql_warehouse_id,
     )
 
-    print("\n" + "="*80)
-    print("BUILDING HYBRID SUPER AGENT WORKFLOW")
-    print("="*80)
+    logger.info("Building hybrid super agent workflow")
 
     workflow = StateGraph(AgentState)
 
@@ -358,17 +359,12 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
 
     workflow.add_edge("summarize", END)
 
-    print("Workflow nodes added:")
-    print("  1. Unified Intent+Context+Clarification (subgraph)")
-    print("  2. Planning Agent")
-    print("  3. SQL Synthesis Agent - Table Route")
-    print("  4. SQL Synthesis Agent - Genie Route")
-    print("  5. SQL Execution Agent")
-    print("  6. Result Summarize Agent - FINAL NODE")
-    print("\nConditional routing configured")
-    print("All paths route to summarize node before END")
-    print("\nHybrid Super Agent workflow created successfully!")
-    print("="*80)
+    logger.info(
+        "Workflow nodes added: intent/context/clarification, planning, "
+        "sql-synthesis (table + genie routes), sql-execution, summarize (final). "
+        "Conditional routing configured; all paths route to summarize before END."
+    )
+    logger.info("Hybrid super agent workflow created successfully")
 
     return workflow
 

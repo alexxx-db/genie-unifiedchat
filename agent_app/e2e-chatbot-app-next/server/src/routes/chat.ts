@@ -544,6 +544,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
             streamId,
             chatId: id,
             stream,
+            ownerId: session?.user.id ?? null,
           });
           if (
             activeTurnRequest &&
@@ -734,6 +735,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           streamId,
           chatId: id,
           stream,
+          ownerId: session?.user.id ?? null,
         });
         if (
           activeTurnRequest &&
@@ -834,8 +836,21 @@ chatRouter.get(
       req.session?.user.id,
     );
 
-    // If chat doesn't exist in DB, it's a temporary chat from the homepage - allow it
+    // If the chat doesn't exist in the DB, it's a temporary chat from the
+    // homepage that isn't persisted yet. Only its originator may resume the
+    // stream — otherwise any authenticated user could attach to another user's
+    // live stream by supplying the chat id. We authorize using the owner id
+    // recorded when the stream was created.
     if (reason === 'not_found') {
+      const streamOwnerId = streamCache.getActiveStreamOwnerId(chatId);
+      if (!streamOwnerId || streamOwnerId !== req.session?.user.id) {
+        console.log(
+          `[Stream Resume] User ${req.session?.user.id} is not the owner of temporary chat ${chatId}`,
+        );
+        const streamError = new ChatSDKError('forbidden:chat', reason);
+        const response = streamError.toResponse();
+        return res.status(response.status).json(response.json);
+      }
       console.log(
         `[Stream Resume] Resuming stream for temporary chat ${chatId} (not yet in DB)`,
       );

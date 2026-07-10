@@ -25,6 +25,73 @@ SQL_KEYWORDS = {
 }
 
 
+def _split_on_statement_semicolons(block: str) -> List[str]:
+    """
+    Split a SQL block on statement-terminating ';' only.
+
+    A plain ``block.split(';')`` corrupts any query whose string literals or
+    comments contain a semicolon (e.g. ``WHERE name = 'a;b'`` or ``-- note; x``).
+    This scanner tracks quoting/comment state and only splits on semicolons that
+    are outside single/double quotes, backtick identifiers, ``--`` line comments,
+    and ``/* ... */`` block comments.
+    """
+    segments: List[str] = []
+    current: List[str] = []
+    quote_char = ""          # active string/identifier quote: ' " or `
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    n = len(block)
+
+    while i < n:
+        ch = block[i]
+        nxt = block[i + 1] if i + 1 < n else ""
+
+        if in_line_comment:
+            current.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+        elif in_block_comment:
+            current.append(ch)
+            if ch == "*" and nxt == "/":
+                current.append(nxt)
+                i += 1
+                in_block_comment = False
+        elif quote_char:
+            current.append(ch)
+            # Doubled quote is an escape (e.g. '' inside a string) -> stay in quote
+            if ch == quote_char:
+                if nxt == quote_char:
+                    current.append(nxt)
+                    i += 1
+                else:
+                    quote_char = ""
+        elif ch == "-" and nxt == "-":
+            current.append(ch)
+            current.append(nxt)
+            i += 1
+            in_line_comment = True
+        elif ch == "/" and nxt == "*":
+            current.append(ch)
+            current.append(nxt)
+            i += 1
+            in_block_comment = True
+        elif ch in ("'", '"', "`"):
+            quote_char = ch
+            current.append(ch)
+        elif ch == ";":
+            segments.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+
+    tail = "".join(current)
+    if tail.strip():
+        segments.append(tail)
+    return segments
+
+
 def _split_multi_query_block(block: str) -> Tuple[List[str], List[str]]:
     """
     Split a single SQL block that may contain multiple semicolon-separated
@@ -50,8 +117,8 @@ def _split_multi_query_block(block: str) -> Tuple[List[str], List[str]]:
           - labels:   list of label strings aligned by index. Empty string when
                       no leading comment was found for a query.
     """
-    raw_segments = block.split(';')
-    
+    raw_segments = _split_on_statement_semicolons(block)
+
     queries: List[str] = []
     labels: List[str] = []
     
