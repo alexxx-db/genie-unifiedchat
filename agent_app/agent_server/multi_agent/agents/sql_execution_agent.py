@@ -322,6 +322,7 @@ class SQLExecutionAgent:
                 "error": f"Only read-only SQL is permitted (SELECT/WITH/UNION/SHOW/DESCRIBE/EXPLAIN/USE/SET): {ro_reason}",
                 "error_type": "ReadOnlyPolicyViolation",
                 "error_hint": "Rephrase the request as a read-only query (e.g., SELECT/WITH) rather than a mutating statement.",
+            }
 
         # Step 2: Enforce LIMIT clause (for safety and token management)
         # Only match a trailing LIMIT at the end of the statement, not inside CTEs/subqueries
