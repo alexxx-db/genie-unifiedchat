@@ -729,16 +729,18 @@ class SQLSynthesisGenieAgent:
                     # (merge_genie_outputs marks it success=False).
                     def _safe_invoke(inp, sid=space_id, t=tool, c=ctx):
                         try:
-                            return c.run(
-                                t.func, question=inp[sid], conversation_id=None
-                            )
+                            q = inp.get(sid, "")
+                            out = c.run(t.func, question=q, conversation_id=None)
+                            if isinstance(out, dict):
+                                return {"question": q, **out}
+                            return {"question": q, "answer": str(out)}
                         except Exception as task_err:  # noqa: BLE001
                             return {
                                 "space_id": sid,
+                                "question": inp.get(sid, ""),
                                 "success": False,
                                 "error": f"Genie call failed for {sid}: {task_err}",
                             }
-
                     parallel_tasks[space_id] = RunnableLambda(_safe_invoke)
                 
                 # Create parallel runner and compose with merge function
