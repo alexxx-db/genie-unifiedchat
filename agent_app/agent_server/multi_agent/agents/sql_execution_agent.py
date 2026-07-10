@@ -105,7 +105,11 @@ def _is_read_only_sql(sql: str) -> Tuple[bool, str]:
     hit = tokens & write_keywords
     if hit:
         return False, f"non-read-only statement: {sorted(hit)[0]}"
-    first_word = re.sub(r"^[\s(]*", "", stripped).split(None, 1)[0].upper() if stripped else ""
+    # Guard on the residue after stripping leading whitespace/parens: re.sub can
+    # yield "" from a non-empty input like "((", so checking `stripped` would
+    # crash on [0]. Fail closed on empty residue.
+    residue = re.sub(r"^[\s(]*", "", stripped)
+    first_word = residue.split(None, 1)[0].upper() if residue else ""
     if first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM") or first_word in _READ_ONLY_COMMAND_PREFIXES:
         return True, ""
     return False, f"could not verify statement is read-only (starts with {first_word or 'nothing'})"
@@ -128,8 +132,10 @@ def _is_limitable_sql(sql: str) -> bool:
         statements = None
     if statements:
         return isinstance(statements[-1], query_types)
-    # Parse failed: only append LIMIT for clearly query-shaped SQL.
-    first_word = re.sub(r"^[\s(]*", "", sql.strip()).split(None, 1)[0].upper() if sql.strip() else ""
+    # Parse failed: only append LIMIT for clearly query-shaped SQL. Guard on the
+    # residue after re.sub (which can be empty for input like "((").
+    residue = re.sub(r"^[\s(]*", "", sql.strip())
+    first_word = residue.split(None, 1)[0].upper() if residue else ""
     return first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM")
 
 

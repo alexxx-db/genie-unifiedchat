@@ -662,49 +662,22 @@ class SQLSynthesisGenieAgent:
                     "reasoning": "",
                     "answer": "",
                     "conversation_id": "",
+                    "error": "",
                     "success": False
                 }
-                
-                # Handle message-based output. Check this first because it is the
-                # more specific shape; the plain-dict branch below matches every
-                # dict, so ordering it first would make this branch unreachable.
-                if isinstance(result, dict) and "messages" in result:
-                    messages = result.get("messages", [])
-                    
-                    # Extract reasoning (query_reasoning)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_reasoning':
-                            extracted["reasoning"] = msg.content if hasattr(msg, 'content') else ""
-                            break
-                    
-                    # Extract SQL (query_sql)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_sql':
-                            extracted["sql"] = msg.content if hasattr(msg, 'content') else ""
-                            extracted["success"] = True
-                            break
-                    
-                    # Extract answer (query_result)
-                    for msg in messages:
-                        if hasattr(msg, 'name') and msg.name == 'query_result':
-                            extracted["answer"] = msg.content if hasattr(msg, 'content') else ""
-                            break
-                    
-                    # Extract conversation_id
-                    extracted["conversation_id"] = result.get("conversation_id", "")
 
-                    # A narrative/answer-only Genie result (no query_sql message)
-                    # is still a successful contribution, so key success off both.
-                    extracted["success"] = bool(extracted["sql"] or extracted["answer"])
-
-                # Handle direct dict output from StructuredTool (the common case).
-                # Also covers isolated per-task error dicts, which carry no SQL or
-                # answer and are therefore marked success=False here.
-                elif isinstance(result, dict):
+                # Every value from _safe_invoke is a plain dict: either the
+                # _genie_tool_call result ({conversation_id, answer, [reasoning],
+                # [sql]}) or a per-task error dict ({space_id, success, error}).
+                # Neither carries a raw `messages` key, so there is no
+                # message-parsing branch. The error is preserved so the
+                # all-failed aggregation can report each task's real cause.
+                if isinstance(result, dict):
                     extracted["answer"] = result.get("answer", "")
                     extracted["sql"] = result.get("sql", "")
                     extracted["reasoning"] = result.get("reasoning", "")
                     extracted["conversation_id"] = result.get("conversation_id", "")
+                    extracted["error"] = result.get("error", "")
                     extracted["success"] = bool(result.get("sql") or result.get("answer"))
 
                 merged_results[space_id] = extracted
