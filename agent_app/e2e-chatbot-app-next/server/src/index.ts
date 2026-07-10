@@ -20,6 +20,7 @@ import { configRouter } from './routes/config';
 import { feedbackRouter } from './routes/feedback';
 import { chartWorkspaceRouter } from './routes/chart-workspaces';
 import { tabularRouter } from './routes/tabular';
+import { authMiddleware, requireAuth } from './middleware/auth';
 import { ChatSDKError } from '@chat-template/core/errors';
 
 // ESM-compatible __dirname
@@ -34,10 +35,23 @@ const PORT =
   process.env.CHAT_APP_PORT ||
   (isDevelopment ? 3001 : process.env.PORT || 3000);
 
-// CORS configuration
+// CORS configuration.
+// The app is normally served same-origin (Databricks Apps), so cross-origin
+// requests should be denied by default rather than reflected. In production,
+// only origins explicitly listed in CORS_ALLOWED_ORIGINS (comma-separated) may
+// make credentialed requests; reflecting every origin with credentials:true let
+// any website issue credentialed reads against the API.
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 app.use(
   cors({
-    origin: isDevelopment ? 'http://localhost:3000' : true,
+    origin: isDevelopment
+      ? 'http://localhost:3000'
+      : allowedOrigins.length > 0
+        ? allowedOrigins
+        : false,
     credentials: true,
   }),
 );
@@ -66,10 +80,23 @@ app.use('/api/tabular', tabularRouter);
 const agentBackendUrl = process.env.API_PROXY;
 if (agentBackendUrl) {
   console.log(`✅ Proxying /invocations to ${agentBackendUrl}`);
-  app.all('/invocations', async (req: Request, res: Response) => {
-    try {
-      const forwardHeaders = { ...req.headers } as Record<string, string>;
-      forwardHeaders['content-length'] = undefined;
+  // Gate the proxy behind authentication. Previously this route was
+  // unauthenticated and forwarded ALL client headers verbatim, so anyone who
+  // could reach the app could drive the agent backend and inject arbitrary
+  // auth/identity headers. Requiring a valid session closes that bypass, and we
+  // strip client-supplied credential headers before forwarding.
+  app.all(
+    '/invocations',
+    [authMiddleware, requireAuth],
+    async (req: Request, res: Response) => {
+      try {
+        const {
+          authorization: _authorization,
+          cookie: _cookie,
+          'content-length': _contentLength,
+          ...safeHeaders
+        } = req.headers;
+        const forwardHeaders = { ...safeHeaders } as Record<string, string>;
 
       const response = await fetch(agentBackendUrl, {
         method: req.method,

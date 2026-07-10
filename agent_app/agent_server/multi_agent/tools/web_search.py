@@ -59,9 +59,11 @@ _CODE_HINT_TOKENS = (
 import ssl
 import urllib.request
 
+# Use a default TLS context with certificate + hostname verification enabled.
+# These lookups hit public NLM/RxNav HTTPS endpoints, so there is no reason to
+# disable verification (doing so exposed responses to MITM tampering, and the
+# results are rendered into user-facing output).
 _SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 def _http_get_json(url: str, timeout: int = 5) -> dict:

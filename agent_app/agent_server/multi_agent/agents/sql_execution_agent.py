@@ -36,9 +36,67 @@ If you're not using resource registration, you can still manually configure:
 
 import re
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from datetime import date, datetime
 from decimal import Decimal
+
+
+# Expression types that represent read-only (non-mutating) SQL. Anything else
+# — INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/GRANT/TRUNCATE/… — is rejected
+# before it ever reaches the warehouse.
+_READ_ONLY_COMMAND_PREFIXES = ("SHOW", "DESCRIBE", "DESC", "EXPLAIN")
+
+
+def _is_read_only_sql(sql: str) -> Tuple[bool, str]:
+    """
+    Return (is_read_only, reason). Defense-in-depth guard so LLM-synthesized
+    SQL (which can be steered by prompt injection) cannot run mutating
+    statements even if the warehouse principal has write grants.
+
+    Uses sqlglot to parse each statement and allows only SELECT/WITH/UNION-style
+    read queries plus a small set of read-only commands (SHOW/DESCRIBE/EXPLAIN).
+    If parsing fails, falls back to a conservative first-keyword denylist.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    stripped = sql.strip()
+    if not stripped:
+        return False, "empty SQL"
+
+    read_only_types = (exp.Select, exp.Union, exp.Subquery, exp.With, exp.Describe)
+    write_keywords = {
+        "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT",
+        "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE",
+        "COPY", "CALL", "SET", "USE", "REFRESH", "OPTIMIZE", "VACUUM",
+    }
+
+    try:
+        statements = [s for s in sqlglot.parse(stripped, read="databricks") if s]
+    except Exception:
+        statements = None
+
+    if statements:
+        for stmt in statements:
+            if isinstance(stmt, read_only_types):
+                continue
+            if isinstance(stmt, exp.Command):
+                # sqlglot represents unsupported/uncommon statements as Command;
+                # allow only known read-only commands (SHOW/DESCRIBE/EXPLAIN).
+                name = (stmt.name or "").upper()
+                if name in _READ_ONLY_COMMAND_PREFIXES:
+                    continue
+                return False, f"non-read-only command: {name or type(stmt).__name__}"
+            return False, f"non-read-only statement: {type(stmt).__name__}"
+        return True, ""
+
+    # Parsing failed — fall back to a first-keyword denylist so we fail closed.
+    first_word = re.sub(r"^[\s(]*", "", stripped).split(None, 1)[0].upper() if stripped else ""
+    if first_word in write_keywords:
+        return False, f"non-read-only statement: {first_word}"
+    if first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM") or first_word in _READ_ONLY_COMMAND_PREFIXES:
+        return True, ""
+    return False, f"could not verify statement is read-only (starts with {first_word or 'nothing'})"
 
 
 class SQLExecutionAgent:
@@ -209,6 +267,23 @@ class SQLExecutionAgent:
             if sql_match:
                 extracted_sql = sql_match.group(1).strip()
         
+        # Step 1b: Reject non-read-only SQL before it reaches the warehouse.
+        # This is defense-in-depth: the SQL is LLM-generated and could be steered
+        # toward mutating statements via prompt injection.
+        is_read_only, ro_reason = _is_read_only_sql(extracted_sql)
+        if not is_read_only:
+            print(f"⛔ Rejected non-read-only SQL: {ro_reason}")
+            return {
+                "success": False,
+                "sql": extracted_sql,
+                "result": None,
+                "row_count": 0,
+                "columns": [],
+                "error": f"Only read-only (SELECT) queries are permitted: {ro_reason}",
+                "error_type": "ReadOnlyPolicyViolation",
+                "error_hint": "Rephrase the request as a read-only SELECT query.",
+            }
+
         # Step 2: Enforce LIMIT clause (for safety and token management)
         # Only match a trailing LIMIT at the end of the statement, not inside CTEs/subqueries
         trailing_limit = re.search(r'\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+\d+)?\s*;?\s*$', extracted_sql, re.IGNORECASE)
