@@ -15,6 +15,7 @@
     "build:client": "npm run build --workspace=@databricks/chatbot-client",
     "build:server": "npm run build --workspace=@databricks/chatbot-server",
     "start": "npm run start --workspace=@databricks/chatbot-server",
+    "typecheck": "tsc --noEmit -p packages/utils/tsconfig.json && tsc --noEmit -p packages/auth/tsconfig.json && tsc --noEmit -p packages/ai-sdk-providers/tsconfig.json && tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/db/tsconfig.json && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p client/tsconfig.json",
     "lint": "biome lint --write --unsafe",
     "lint:fix": "biome lint --write --unsafe && biome format --write",
     "format": "biome format --write",

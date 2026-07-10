@@ -32,6 +32,23 @@ jobs:
         working-directory: agent_app
         run: uv run pytest tests/ -v
 
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # Full TypeScript type-check of every workspace (client, server, and the
+      # @chat-template/* packages). tsdown/vite build with esbuild and do NOT
+      # type-check, so this is the gate that catches type regressions before merge.
+      - name: Install frontend dependencies
+        working-directory: agent_app/e2e-chatbot-app-next
+        run: npm ci
+      - name: Type-check frontend
+        working-directory: agent_app/e2e-chatbot-app-next
+        run: npm run typecheck
+
   validate-bundle:
     needs: unit-tests
     runs-on: ubuntu-latest
