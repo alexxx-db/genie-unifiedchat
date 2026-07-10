@@ -72,7 +72,11 @@ def _append_privacy_query_postfix(query: str, enabled: bool) -> str:
 # ---------------------------------------------------------------------------
 # Module-level setup (replaces __init__ of SuperAgentHybridResponsesAgent)
 # ---------------------------------------------------------------------------
-_workflow = create_super_agent_hybrid()
+try:
+    _workflow = create_super_agent_hybrid()
+except Exception as e:
+    logger.warning(f"Failed to create workflow at import time: {e}")
+    _workflow = None
 
 LAKEBASE_INSTANCE_NAME = None
 LAKEBASE_PROJECT = None
@@ -214,6 +218,7 @@ def _get_compiled_workflow_app(*, record_trace: bool = True):
     """Compile the workflow once and reuse it across requests."""
     global _compiled_workflow_app, _compiled_workflow_checkpointer
     global _compiled_workflow_checkpointer_exit, _compiled_workflow_last_used_monotonic
+    global _workflow
     with mlflow_span_if(
         record_trace,
         name="get_compiled_workflow_app",
@@ -250,27 +255,31 @@ def _get_compiled_workflow_app(*, record_trace: bool = True):
             from databricks_langchain import CheckpointSaver
 
             logger.info("Compiling workflow app for reuse")
-            with mlflow_span_if(
-                record_trace,
-                name="workflow_checkpointer_init",
-                span_type=SpanType.TOOL,
-                attributes={
-                    "lakebase_instance_name": LAKEBASE_INSTANCE_NAME or "",
-                    "lakebase_project": LAKEBASE_PROJECT or "",
-                    "lakebase_branch": LAKEBASE_BRANCH or "",
-                    "lakebase_autoscaling_endpoint": LAKEBASE_AUTOSCALING_ENDPOINT or "",
-                },
-            ):
-                checkpointer_init_started = time.perf_counter()
-                cm = CheckpointSaver(**LAKEBASE_RUNTIME_KWARGS)
-            logger.info(
-                "Initialized workflow checkpointer in %.1f ms",
-                (time.perf_counter() - checkpointer_init_started) * 1000,
-            )
+            try:
+                with mlflow_span_if(
+                    record_trace,
+                    name="workflow_checkpointer_init",
+                    span_type=SpanType.TOOL,
+                    attributes={
+                        "lakebase_instance_name": LAKEBASE_INSTANCE_NAME or "",
+                        "lakebase_project": LAKEBASE_PROJECT or "",
+                        "lakebase_branch": LAKEBASE_BRANCH or "",
+                        "lakebase_autoscaling_endpoint": LAKEBASE_AUTOSCALING_ENDPOINT or "",
+                    },
+                ):
+                    checkpointer_init_started = time.perf_counter()
+                    cm = CheckpointSaver(**LAKEBASE_RUNTIME_KWARGS)
+                logger.info(
+                    "Initialized workflow checkpointer in %.1f ms",
+                    (time.perf_counter() - checkpointer_init_started) * 1000,
+                )
+            except Exception as exc:
+                logger.warning("Failed to initialize workflow checkpointer, continuing without it: %s", exc)
+                cm = None
             checkpointer = cm
             exit_fn = None
 
-            if hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
+            if cm is not None and hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
                 with mlflow_span_if(
                     record_trace,
                     name="workflow_checkpointer_enter",
@@ -287,6 +296,8 @@ def _get_compiled_workflow_app(*, record_trace: bool = True):
                 exit_fn = cm.__exit__
 
             try:
+                if _workflow is None:
+                    _workflow = create_super_agent_hybrid()
                 with mlflow_span_if(
                     record_trace,
                     name="workflow_compile",
