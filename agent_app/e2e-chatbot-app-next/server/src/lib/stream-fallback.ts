@@ -102,9 +102,11 @@ export async function fallbackToStreamText(
           clarificationData = raw.databricks_output.clarification;
         }
       },
-      onFinish: ({ usage: finishUsage }) => {
-        usage = finishUsage;
-        params.onFinish?.({ usage: finishUsage });
+      onFinish: (event) => {
+        usage = event.totalUsage;
+        // Forward the full finish event; params.onFinish requires the complete
+        // StepResult payload, not just { usage }.
+        params.onFinish?.(event);
       },
     });
 

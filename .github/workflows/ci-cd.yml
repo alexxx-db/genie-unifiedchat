@@ -32,19 +32,68 @@ jobs:
         working-directory: agent_app
         run: uv run pytest tests/ -v
 
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # Full TypeScript type-check of every workspace (client, server, and the
+      # @chat-template/* packages). tsdown/vite build with esbuild and do NOT
+      # type-check, so this is the gate that catches type regressions before merge.
+      - name: Install frontend dependencies
+        working-directory: agent_app/e2e-chatbot-app-next
+        run: npm ci
+      - name: Type-check frontend
+        working-directory: agent_app/e2e-chatbot-app-next
+        run: npm run typecheck
+
   validate-bundle:
     needs: unit-tests
     runs-on: ubuntu-latest
     steps:
+      # Bundle validation needs real workspace auth (it resolves
+      # ${workspace.current_user.userName}). When the Databricks secrets are not
+      # configured — e.g. on a fork or a PR without access — skip rather than
+      # hard-fail; the credential-free jobs still gate config/syntax/tests.
+      - name: Check Databricks credentials
+        id: creds
+        env:
+          DBX_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DBX_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          if [ -n "$DBX_HOST" ] && [ -n "$DBX_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DATABRICKS_HOST/DATABRICKS_TOKEN secrets not configured — skipping bundle validation."
+          fi
       - uses: actions/checkout@v3
+        if: steps.creds.outputs.available == 'true'
       - uses: actions/setup-python@v4
+        if: steps.creds.outputs.available == 'true'
         with:
           python-version: '3.11'
       - uses: databricks/setup-cli@main
-      - name: Validate app bundle
+        if: steps.creds.outputs.available == 'true'
+      - name: Configure Databricks profile
+        if: steps.creds.outputs.available == 'true'
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          # The committed databricks.yml dev target uses a placeholder profile
+          # ("<dev-profile>"), which the CLI honors over env vars. Materialize
+          # that profile from secrets so `bundle validate -t dev` authenticates.
+          umask 077
+          cat > "$HOME/.databrickscfg" <<CFG
+          [<dev-profile>]
+          host  = ${DATABRICKS_HOST}
+          token = ${DATABRICKS_TOKEN}
+          CFG
+      - name: Validate app bundle
+        if: steps.creds.outputs.available == 'true'
         working-directory: agent_app
         run: databricks bundle validate -t dev
 
