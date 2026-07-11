@@ -439,7 +439,8 @@
         <p>
           A production-ready, LangGraph-powered multi-agent system that understands natural language,
           routes queries intelligently across Databricks Genie spaces, synthesizes SQL across domains,
-          and returns coherent, cited answers — without users writing a single line of SQL.
+          and returns coherent, cited answers — complete with charts and tabular predictions —
+          without users writing a single line of SQL.
         </p>
       </div>
       <div class="s1-metrics">
@@ -448,7 +449,7 @@
           <div class="metric-label">Response time</div>
         </div>
         <div class="metric-box">
-          <div class="metric-value mv-blue">7</div>
+          <div class="metric-value mv-blue">6</div>
           <div class="metric-label">Specialized agents</div>
         </div>
         <div class="metric-box">
@@ -467,28 +468,31 @@
 
         <div class="flow-diagram">
           <div class="flow-level">
-            <div class="flow-box fb-sup">🎯 Supervisor Agent</div>
+            <div class="flow-box fb-sup">🎯 Intent · Context · Clarification</div>
           </div>
           <div class="flow-arrow-v">↓</div>
           <div class="flow-level">
             <div class="flow-box fb-plan">🧠 Think &amp; Plan Agent</div>
             <div class="flow-box fb-vs">🔍 Vector Search</div>
           </div>
-          <div class="flow-arrow-v">↓ routes to</div>
+          <div class="flow-arrow-v">↓ routes to one of two synthesis paths</div>
           <div class="flow-level" style="gap:6px">
-            <div class="flow-box fb-genie">💬 Genie Agent A</div>
-            <div class="flow-box fb-genie">💬 Genie Agent B</div>
-            <span style="color:var(--dbx-muted);font-size:11px;align-self:center">…parallel</span>
+            <div class="flow-box fb-sql">⚡ SQL Synthesis · Table route</div>
+            <span style="color:var(--dbx-muted);font-size:11px;align-self:center">UC Functions</span>
           </div>
-          <div class="flow-arrow-v">↓ when cross-domain join needed</div>
+          <div class="flow-level" style="gap:6px">
+            <div class="flow-box fb-genie">💬 SQL Synthesis · Genie route</div>
+            <span style="color:var(--dbx-muted);font-size:11px;align-self:center">N Genie agents in parallel</span>
+          </div>
+          <div class="flow-arrow-v">↓</div>
           <div class="flow-level">
-            <div class="flow-box fb-sql">⚡ SQL Synthesis Agent</div>
             <div class="flow-box fb-sql">🔄 SQL Execution Agent</div>
+            <div class="flow-box fb-mem">🗂 Lakebase Memory</div>
           </div>
           <div class="flow-arrow-v">↓</div>
           <div class="flow-level">
             <div class="flow-box fb-sum">✍️ Summarize Agent</div>
-            <div class="flow-box fb-mem">🗂 Lakebase Memory</div>
+            <div class="flow-box fb-genie">📊 Chart Generation</div>
           </div>
         </div>
       </div>
@@ -516,6 +520,20 @@
             <div class="feat-content">
               <div class="feat-name">Multi-Step Instructed Retrieval</div>
               <div class="feat-desc">Being Detective and collect most relevant clues for solving the question</div>
+            </div>
+          </div>
+          <div class="feat-row">
+            <div class="feat-icon fi-blue">📊</div>
+            <div class="feat-content">
+              <div class="feat-name">Charts &amp; Visualization</div>
+              <div class="feat-desc">Auto-generated Recharts visualizations via the "Ask chart" endpoint</div>
+            </div>
+          </div>
+          <div class="feat-row">
+            <div class="feat-icon fi-green">📈</div>
+            <div class="feat-content">
+              <div class="feat-name">Tabular Prediction (TabICLv2)</div>
+              <div class="feat-desc">Embedded in-context tabular model for held-out prediction on result sets</div>
             </div>
           </div>
           <div class="feat-row">
@@ -554,6 +572,7 @@
         <span class="stack-chip">Lakebase</span>
         <span class="stack-chip">MLflow</span>
         <span class="stack-chip">Claude 4.5 Sonnet/Haiku</span>
+        <span class="stack-chip">TabICLv2</span>
         <span class="stack-chip">Databricks Apps</span>
       </div>
       <a class="cta-link" href="https://github.com/databricks-solutions/dbx-unifiedchat" target="_blank">https://github.com/databricks-solutions ›</a>
@@ -593,7 +612,7 @@
           <div class="panel-icon pi-blue">🗂</div>
           <div>
             <div class="panel-title">Tables → Genies App</div>
-            <div class="panel-sub">Databricks App (Dash) · Unity Catalog · Genie SDK</div>
+            <div class="panel-sub">Databricks App (FastAPI + React) · Unity Catalog · Genie SDK</div>
           </div>
         </div>
 

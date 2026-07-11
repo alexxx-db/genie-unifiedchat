@@ -294,18 +294,18 @@
       <div class="section-tag">Core Intelligence</div>
       <h2>Multi-Agent System</h2>
       <p>
-        7 specialized AI agents orchestrated by LangGraph analyze, route, and answer
+        6 specialized AI agents orchestrated by LangGraph analyze, route, and answer
         cross-domain data queries &mdash; turning natural language into precise SQL across any number of data sources.
       </p>
       <ul class="feature-list">
-        <li><strong style="color:#e2e8f0">Supervisor + Planning Agents</strong> &mdash; Intelligent query analysis &amp; routing</li>
+        <li><strong style="color:#e2e8f0">Intent + Planning Agents</strong> &mdash; Intelligent query analysis &amp; routing</li>
         <li><strong style="color:#e2e8f0">Genie Agents (parallel)</strong> &mdash; NL-to-SQL for each data domain</li>
         <li><strong style="color:#e2e8f0">SQL Synthesis + Execution</strong> &mdash; Complex cross-domain JOINs</li>
-        <li><strong style="color:#e2e8f0">Clarification &amp; Summarize</strong> &mdash; Handles ambiguity, formats answers</li>
+        <li><strong style="color:#e2e8f0">Clarification &amp; Summarize</strong> &mdash; Handles ambiguity, formats answers with charts &amp; tabular predictions</li>
         <li><strong style="color:#e2e8f0">Memory (Lakebase)</strong> &mdash; Multi-turn chat with long-term recall</li>
       </ul>
       <div class="architecture-mini">
-        <span class="highlight-red">User Query</span> <span class="dim">&rarr;</span> <span class="highlight-yellow">Supervisor</span> <span class="dim">&rarr;</span> <span class="highlight-purple">Planner</span><br>
+        <span class="highlight-red">User Query</span> <span class="dim">&rarr;</span> <span class="highlight-yellow">Intent + Clarify</span> <span class="dim">&rarr;</span> <span class="highlight-purple">Planner</span><br>
         &nbsp;&nbsp;<span class="dim">&rarr;</span> <span class="highlight-blue">Genie Agents</span> <span class="dim">|</span> <span class="highlight-green">SQL Synth</span> <span class="dim">&rarr;</span> <span class="highlight-red">Execute</span><br>
         &nbsp;&nbsp;<span class="dim">&rarr;</span> <span class="highlight-yellow">Summarize</span> <span class="dim">&rarr;</span> <span class="highlight-red">Answer</span>
       </div>
@@ -367,6 +367,7 @@
       <span class="badge badge-green">Lakebase</span>
       <span class="badge badge-purple">Vector Search</span>
       <span class="badge badge-yellow">Claude Sonnet 4.5</span>
+      <span class="badge badge-purple">TabICLv2</span>
       <span class="badge badge-blue">Unity Catalog</span>
       <span class="badge badge-orange">MLflow</span>
       <span class="badge badge-green">Databricks Apps</span>
