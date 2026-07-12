@@ -235,7 +235,7 @@ Frontend: Poll useGetGenieCreationStatusSuspense()
 - **Databricks CLI** (for deployment)
 
 ### Deployment Target
-- **Databricks Workspace** (fevm-serverless-dbx-unifiedchat.cloud.databricks.com)
+- **Databricks Workspace** (dbc-3aa503a9-4fa8.cloud.databricks.com)
 - **SQL Warehouse** (a4ed2ccbda385db9)
 - **Compute**: Serverless (APX)
 

@@ -73,7 +73,7 @@ for key, default in _WIDGET_DEFAULTS.items():
 
 params = {key: dbutils.widgets.get(key).strip() for key in _WIDGET_DEFAULTS}
 
-app_name = params["app_name"] or f"dbx-unifiedchat-app-{params['target'] or 'dev'}"
+app_name = params["app_name"] or "genie-juan"
 target = params["target"] or "dev"
 catalog_name = params["catalog_name"] or None
 schema_name = params["schema_name"] or None

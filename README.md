@@ -1,6 +1,6 @@
-![DBX-UnifiedChat Logo](docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png)
+![Genie Juan Logo](docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png)
 
-# DBX-UnifiedChat - Databricks Unified Chat
+# Genie Juan - Databricks Unified Chat
 
 > A multi-agent system for intelligent cross-domain data queries built with LangGraph, Databricks Genie, Lakebase, and Claude models/skills on Databricks Platform.
 
@@ -18,7 +18,7 @@
 
 ## Overview
 
-Organizations struggle to query data across multiple domains and data sources, requiring deep SQL expertise and knowledge of complex data schemas. **Databricks Unified Chat** solves this by providing an intelligent multi-agent system that routes natural language queries to the appropriate data sources, synthesizes results, and delivers comprehensive answers.
+Organizations struggle to query data across multiple domains and data sources, requiring deep SQL expertise and knowledge of complex data schemas. **Genie Juan** solves this by providing an intelligent multi-agent system that routes natural language queries to the appropriate data sources, synthesizes results, and delivers comprehensive answers.
 
 Built on LangGraph, Databricks Genie and Lakebase, this solution enables business users to ask questions spanning multiple data domains without needing to understand the underlying data architecture or write complex SQL queries.
 
@@ -27,7 +27,7 @@ the Databricks App bundle, backend agent runtime, UI, and deployment scripts.
 Older root-level deployment and Model Serving paths are no longer part of the
 active repository workflow.
 
-> ### Why use DBX-UnifiedChat?
+> ### Why use Genie Juan?
 - **Accuracy of Answer** 
     - Validated with customers and partners, e.g., tumor outcome data analysis.
 - **Explanation and Curation** 
@@ -83,7 +83,7 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 
 ## Presentation
 
-<a href="https://blitzbricksteryy-db.github.io/dbx-unifiedchat/docs/decks/slides_2slide.html" target="_blank">
+<a href="https://alexxx-db.github.io/genie-unifiedchat/docs/decks/slides_2slide.html" target="_blank">
   <img src="docs/logos/deck_logo.png" width="600px" alt="View Presentation Slides" />
   <br />
   <b>🚀 Click here to view the Interactive Presentation Slides</b>
@@ -112,8 +112,8 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 ### Installation
 
 ```bash
-git clone https://github.com/databricks-solutions/dbx-unifiedchat.git
-cd dbx-unifiedchat
+git clone https://github.com/alexxx-db/genie-unifiedchat.git
+cd genie-unifiedchat
 ```
 
 ### Recommended Workflow

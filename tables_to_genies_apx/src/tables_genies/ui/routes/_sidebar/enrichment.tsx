@@ -304,7 +304,7 @@ function EnrichmentProgress({
                 
                 <div className="flex flex-col gap-2">
                   <a
-                    href={`https://fevm-serverless-dbx-unifiedchat.cloud.databricks.com/explore/data/${metadataTable.split('.')[0]}/${metadataTable.split('.')[1]}/${metadataTable.split('.')[2]}`}
+                    href={`https://dbc-3aa503a9-4fa8.cloud.databricks.com/explore/data/${metadataTable.split('.')[0]}/${metadataTable.split('.')[1]}/${metadataTable.split('.')[2]}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-2 px-4 py-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors"
@@ -317,7 +317,7 @@ function EnrichmentProgress({
                   </a>
                   
                   <a
-                    href={`https://fevm-serverless-dbx-unifiedchat.cloud.databricks.com/explore/data/${chunksTable.split('.')[0]}/${chunksTable.split('.')[1]}/${chunksTable.split('.')[2]}`}
+                    href={`https://dbc-3aa503a9-4fa8.cloud.databricks.com/explore/data/${chunksTable.split('.')[0]}/${chunksTable.split('.')[1]}/${chunksTable.split('.')[2]}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-2 px-4 py-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors"

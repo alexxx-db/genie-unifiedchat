@@ -102,7 +102,7 @@ variables:
     default: "<app-name-${bundle.target}>"
   # Common override: branding/logo shown in the UI greeting screen.
   app_logo_url:
-    default: "https://raw.githubusercontent.com/databricks-solutions/dbx-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png"
+    default: "https://raw.githubusercontent.com/alexxx-db/genie-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png"
   chat_proxy_timeout_seconds:
     default: "300"
   sample_size:
