@@ -394,6 +394,36 @@ def planning_node(state: AgentState) -> dict:
         next_agent = "sql_synthesis_table"
         print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
 
+    # Normalize genie_route_plan + resolve genie_execution_mode (distinct from UI
+    # SQL execution_mode). Keep structured depends_on/inject for DAG chaining.
+    from ..utils.genie_route_dag import (
+        normalize_genie_route_plan,
+        resolve_genie_execution_mode,
+        summarize_plan_for_logging,
+    )
+
+    genie_route_plan = plan.get("genie_route_plan")
+    genie_execution_mode = None
+    if next_agent == "sql_synthesis_genie" and genie_route_plan:
+        normalized_grp = normalize_genie_route_plan(genie_route_plan)
+        genie_execution_mode = resolve_genie_execution_mode(
+            plan.get("genie_execution_mode"),
+            normalized_grp,
+        )
+        genie_route_plan = normalized_grp or genie_route_plan
+        plan = dict(plan)
+        plan["genie_route_plan"] = genie_route_plan
+        plan["genie_execution_mode"] = genie_execution_mode
+        print(
+            "  Genie plan normalized: "
+            f"{json.dumps(summarize_plan_for_logging(normalized_grp, genie_execution_mode))}"
+        )
+    elif next_agent != "sql_synthesis_genie":
+        genie_route_plan = None
+        plan = dict(plan)
+        plan["genie_route_plan"] = None
+        plan["genie_execution_mode"] = None
+
     _debug_log(
         "planning.py:planning_node:route_decision",
         "planning route resolved",
@@ -402,12 +432,19 @@ def planning_node(state: AgentState) -> dict:
             "plan_join_strategy": plan.get("join_strategy"),
             "resolved_join_strategy": join_strategy,
             "next_agent": next_agent,
+            "genie_execution_mode": genie_execution_mode,
             "relevant_space_count": len(relevant_spaces_full),
         },
     )
     
     # Emit plan formulation result
-    writer({"type": "plan_formulation", "force_route": force_route, "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
+    writer({
+        "type": "plan_formulation",
+        "force_route": force_route,
+        "strategy": join_strategy,
+        "requires_join": plan.get("requires_join", False),
+        "genie_execution_mode": genie_execution_mode,
+    })
     
     sub_questions = plan.get("sub_questions", [])
     
@@ -422,7 +459,8 @@ def planning_node(state: AgentState) -> dict:
         "join_strategy": join_strategy,
         "join_strategy_route": next_agent,
         "execution_plan": plan.get("execution_plan", ""),
-        "genie_route_plan": plan.get("genie_route_plan"),
+        "genie_route_plan": genie_route_plan,
+        "genie_execution_mode": genie_execution_mode,
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
         "relevant_spaces": relevant_spaces_full,
         "next_agent": next_agent,

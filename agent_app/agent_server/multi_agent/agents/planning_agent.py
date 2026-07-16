@@ -185,7 +185,8 @@ class PlanningAgent:
             - requires_join: Boolean indicating if data join is needed
             - join_strategy: "table_route" or "genie_route"
             - execution_plan: Brief description of execution plan
-            - genie_route_plan: Dictionary mapping space_id to partial question (if genie_route)
+            - genie_execution_mode: "parallel" or "dag" (genie_route only; not UI SQL execution_mode)
+            - genie_route_plan: space_id → question string OR structured DAG step
         """
         # Use original_query if provided, otherwise use query as original
         original_query_display = original_query if original_query is not None else query
@@ -200,6 +201,7 @@ class PlanningAgent:
             forced_route_instructions = """
 - UI override: Table Route is selected.
 - You must use Table Route and must keep `genie_route_plan` null.
+- Set genie_execution_mode to null.
 """
 
         spaces_info = [
@@ -217,11 +219,30 @@ class PlanningAgent:
                 "requires_join": False,
                 "join_strategy": "table_route",
                 "execution_plan": "Brief description of execution plan",
+                "genie_execution_mode": None,
                 "genie_route_plan": None,
             },
             indent=2,
         )
-        
+        dag_example = json.dumps(
+            {
+                "space_id_1": {
+                    "question": "Top 10 drugs by total cost. Please limit to top 10 rows",
+                    "depends_on": [],
+                    "inject": ["ids", "filters", "sql_preview", "answer_summary"],
+                },
+                "space_id_2": {
+                    "question": (
+                        "Diagnoses associated with the provided drug IDs. "
+                        "Please limit to top 10 rows"
+                    ),
+                    "depends_on": ["space_id_1"],
+                    "inject": ["ids", "filters", "sql_preview", "answer_summary"],
+                },
+            },
+            indent=2,
+        )
+
         planning_prompt = f"""
 You are a query planning expert. Analyze the following question and create an execution plan.
 
@@ -247,10 +268,21 @@ Break down the question and determine:
     - If Genie Route is selected from UI, you must use Genie Route and must create `genie_route_plan`
     - always populate the join_strategy field in the JSON output.
 5. Execution plan: A brief description of how to execute the plan.
-    - For genie_route: Return "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
-    - For table_route: Return "genie_route_plan": null
-    - Each partial_question should be similar to original but scoped to that space
-    - Add "Please limit to top 10 rows" to each partial question
+6. For genie_route ONLY — choose genie_execution_mode and genie_route_plan shape:
+    - "parallel": Independent space questions (no answer from space A needed to ask space B).
+      Use flat map: {{"space_id_1": "partial_question_1", "space_id_2": "partial_question_2"}}
+    - "dag": Staged / dependent questions where later Genie prompts need concrete values
+      from earlier Genie answers (IDs, filters, top-N lists, SQL predicates).
+      Examples that REQUIRE dag: "top 10 drugs and their diagnoses",
+      "highest-cost members then their claims", "find codes then look up descriptions in another space".
+      Use structured steps:
+{dag_example}
+      - depends_on: list of upstream space_ids (empty for roots)
+      - inject: subset of ["ids","filters","sql_preview","answer_summary"] to chain forward
+    - For table_route: genie_route_plan=null and genie_execution_mode=null
+    - Each question should be scoped to that space
+    - Add "Please limit to top 10 rows" to each question
+    - Prefer dag over parallel when one space's results constrain another space's question
 {forced_route_instructions}
 
 Return your analysis as JSON:

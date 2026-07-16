@@ -93,7 +93,8 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
     return {
         "plan": state.get("plan", {}),
         "relevant_spaces": state.get("relevant_spaces", []),
-        "genie_route_plan": state.get("genie_route_plan")
+        "genie_route_plan": state.get("genie_route_plan"),
+        "genie_execution_mode": state.get("genie_execution_mode"),
     }
 
 
@@ -548,9 +549,14 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     track_agent_model_usage("sql_synthesis_genie", llm_endpoint)
     
     # Use minimal context (already extracted)
-    plan = context.get("plan", {})
+    plan = dict(context.get("plan") or {})
     genie_route_plan = context.get("genie_route_plan") or plan.get("genie_route_plan", {})
-    
+    genie_execution_mode = context.get("genie_execution_mode") or plan.get("genie_execution_mode")
+    if genie_route_plan:
+        plan["genie_route_plan"] = genie_route_plan
+    if genie_execution_mode:
+        plan["genie_execution_mode"] = genie_execution_mode
+
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")
         return {
@@ -558,14 +564,20 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             "synthesis_error": "No routing plan available for genie route",
             "next_agent": "summarize",
         }
-    
+
+    from ..utils.genie_route_dag import (
+        compute_execution_waves,
+        legacy_question_map,
+        normalize_genie_route_plan,
+        resolve_genie_execution_mode,
+    )
+
     try:
         # Inject retry / sequential context into the plan if looping
         loop_prefix = _build_loop_prompt_prefix(state)
         if loop_prefix:
             loop_reason = state.get("loop_reason")
             print(f"Loop reason: {loop_reason} — injecting context into plan")
-            plan = dict(plan)
             original_query = plan.get("original_query", "")
 
             room_info = "\n".join(
@@ -579,6 +591,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 # genie_route_plan may not match sub_questions (different phrasing),
                 # so index-based trimming is unreliable -- just disable it.
                 plan["genie_route_plan"] = None
+                plan["genie_execution_mode"] = None
                 print("  Nulled genie_route_plan for sequential step — LLM will use individual tools")
 
                 genie_guidance = (
@@ -603,19 +616,53 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
 
             plan["original_query"] = f"{loop_prefix}{genie_guidance}\n\nOriginal question: {original_query}"
             writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": f"Retry/sequential context injected (loop_reason={loop_reason})"})
-        
+
         active_grp = plan.get("genie_route_plan") or {}
         if active_grp:
-            print(f"Querying {len(active_grp)} Genie agents...")
-            for idx, (space_id, query) in enumerate(active_grp.items(), 1):
-                space_title = next((s.get("space_title", space_id) for s in relevant_spaces if s.get("space_id") == space_id), space_id)
+            normalized_grp = normalize_genie_route_plan(active_grp)
+            mode = resolve_genie_execution_mode(
+                plan.get("genie_execution_mode"),
+                normalized_grp,
+            )
+            plan["genie_execution_mode"] = mode
+            plan["genie_route_plan"] = normalized_grp or active_grp
+            waves = compute_execution_waves(normalized_grp) if normalized_grp else []
+            question_map = legacy_question_map(normalized_grp) if normalized_grp else {}
+            print(
+                f"Querying {len(question_map)} Genie agents "
+                f"(mode={mode}, waves={len(waves)})..."
+            )
+            writer({
+                "type": "agent_thinking",
+                "agent": "sql_synthesis_genie",
+                "content": (
+                    f"Genie execution mode={mode}; "
+                    f"{len(question_map)} space(s); {len(waves)} wave(s)"
+                ),
+            })
+            for idx, (space_id, query) in enumerate(question_map.items(), 1):
+                space_title = next(
+                    (
+                        s.get("space_title", space_id)
+                        for s in relevant_spaces
+                        if s.get("space_id") == space_id
+                    ),
+                    space_id,
+                )
+                deps = (normalized_grp.get(space_id) or {}).get("depends_on") or []
+                dep_note = f" (depends_on={deps})" if deps else ""
                 writer({
                     "type": "genie_agent_call",
                     "agent": "sql_synthesis_genie",
                     "space_id": space_id,
                     "space_title": space_title,
                     "query": query,
-                    "content": f"[{idx}/{len(active_grp)}] Calling Genie agent '{space_title}'"
+                    "depends_on": deps,
+                    "genie_execution_mode": mode,
+                    "content": (
+                        f"[{idx}/{len(question_map)}] Genie '{space_title}'"
+                        f"{dep_note}"
+                    ),
                 })
         else:
             print("Sequential step — LLM will pick a Genie room via individual tools")

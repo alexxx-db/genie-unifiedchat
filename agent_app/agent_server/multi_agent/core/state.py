@@ -85,7 +85,10 @@ class GraphInput(TypedDict, total=False):
     requires_join: Optional[bool]
     join_strategy: Optional[str]
     execution_plan: Optional[str]
-    genie_route_plan: Optional[Dict[str, str]]
+    # space_id → question str OR structured {question, depends_on, inject}
+    genie_route_plan: Optional[Dict[str, Any]]
+    # Distinct from UI SQL execution_mode ("parallel"|"sequential")
+    genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
     sql_query: Optional[str]
     sql_queries: Optional[List[str]]
     sql_query_labels: Optional[List[str]]
@@ -142,7 +145,10 @@ class AgentState(TypedDict):
     requires_join: Optional[bool]
     join_strategy: Optional[str]
     execution_plan: Optional[str]
-    genie_route_plan: Optional[Dict[str, str]]
+    # space_id → question str OR structured {question, depends_on, inject}
+    genie_route_plan: Optional[Dict[str, Any]]
+    # Distinct from UI SQL execution_mode ("parallel"|"sequential")
+    genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
 
     # SQL Synthesis
     sql_query: Optional[str]
@@ -236,6 +242,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "join_strategy": None,
         "execution_plan": None,
         "genie_route_plan": None,
+        "genie_execution_mode": None,
 
         # SQL fields (per-query)
         "sql_query": None,
