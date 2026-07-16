@@ -108,15 +108,30 @@ def _build_sequential_feedback(
                 f"Data: {sample_json}\n"
             )
 
+        from ..utils.join_contract import (
+            build_join_contract_from_execution,
+            format_join_contract_block,
+        )
+
         literal_package = build_executed_literal_package(preserved)
         literal_block = format_executed_literals_block(literal_package)
-        if literal_block:
-            parts.append("### Concrete literals for the next Genie / SQL question:")
-            parts.append(literal_block)
+        contract_block = format_join_contract_block(
+            build_join_contract_from_execution(
+                preserved,
+                literal_package=literal_package,
+            )
+        )
+        if contract_block or literal_block:
+            parts.append("### Shared join contract / literals for the next Genie / SQL question:")
+            if contract_block:
+                parts.append(contract_block)
+            if literal_block and "EXECUTED RESULT LITERALS" not in (contract_block or ""):
+                parts.append(literal_block)
             parts.append(
                 "\n### Instructions for next step:\n"
-                "- Embed these concrete literals in the next Genie question or SQL filter "
-                "(e.g. IN lists / exact codes).\n"
+                "- Ground the next Genie question in the JOIN CONTRACT "
+                "(keys, time window, metrics, sql_by_space) and concrete literals.\n"
+                "- Embed exact codes/IDs in filters (e.g. IN lists).\n"
                 "- Do NOT ask Genie to rediscover the set already returned above "
                 "(for example, do not re-ask for 'top N' if those IDs are already listed)."
             )
@@ -479,13 +494,25 @@ def _execute_sequential(
                 "messages": [SystemMessage(content=f"Sequential complete: {len(preserved)} result sets")],
             }
         from ..utils.executed_result_literals import build_executed_literal_package
+        from ..utils.join_contract import (
+            build_join_contract_from_execution,
+            merge_join_contracts,
+        )
 
         literal_package = build_executed_literal_package(preserved)
+        join_contract = merge_join_contracts(
+            state.get("join_contract"),
+            build_join_contract_from_execution(
+                preserved,
+                literal_package=literal_package,
+            ),
+        )
         return {
             "preserved_results": preserved,
             "sequential_step": next_step,
             "sql_retry_count": 0,
             "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
+            "join_contract": join_contract,
             "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
             "loop_reason": "sequential_next",
             "next_agent": route or "summarize",
@@ -518,13 +545,25 @@ def _execute_sequential(
             "messages": [SystemMessage(content=f"Sequential complete (with skipped failures): {len(preserved)} result sets")],
         }
     from ..utils.executed_result_literals import build_executed_literal_package
+    from ..utils.join_contract import (
+        build_join_contract_from_execution,
+        merge_join_contracts,
+    )
 
     literal_package = build_executed_literal_package(preserved)
+    join_contract = merge_join_contracts(
+        state.get("join_contract"),
+        build_join_contract_from_execution(
+            preserved,
+            literal_package=literal_package,
+        ),
+    )
     return {
         "preserved_results": preserved,
         "sequential_step": next_step,
         "sql_retry_count": 0,
         "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
+        "join_contract": join_contract,
         "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
         "loop_reason": "sequential_next",
         "next_agent": route or "summarize",

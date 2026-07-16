@@ -99,6 +99,7 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
         "dependency_edges": state.get("dependency_edges"),
         "genie_conversation_ids": state.get("genie_conversation_ids"),
         "executed_result_literals": state.get("executed_result_literals"),
+        "join_contract": state.get("join_contract"),
     }
 
 
@@ -570,6 +571,11 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         or plan.get("executed_result_literals")
         or state.get("executed_result_literals")
     )
+    join_contract = (
+        context.get("join_contract")
+        or plan.get("join_contract")
+        or state.get("join_contract")
+    )
     if genie_route_plan:
         plan["genie_route_plan"] = genie_route_plan
     if genie_execution_mode:
@@ -580,6 +586,8 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         plan["genie_conversation_ids"] = genie_conversation_ids
     if executed_result_literals:
         plan["executed_result_literals"] = executed_result_literals
+    if join_contract:
+        plan["join_contract"] = join_contract
 
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")
@@ -623,6 +631,12 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     enrich_question_with_executed_literals,
                     format_executed_literals_block,
                 )
+                from ..utils.join_contract import (
+                    build_join_contract_from_execution,
+                    enrich_question_with_join_contract,
+                    format_join_contract_block,
+                    merge_join_contracts,
+                )
 
                 literal_package = (
                     plan.get("executed_result_literals")
@@ -633,6 +647,16 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 if literal_package and literal_package.get("has_literals"):
                     plan["executed_result_literals"] = literal_package
 
+                join_contract = merge_join_contracts(
+                    plan.get("join_contract") or state.get("join_contract"),
+                    build_join_contract_from_execution(
+                        state.get("preserved_results"),
+                        literal_package=literal_package,
+                    ),
+                )
+                plan["join_contract"] = join_contract
+                contract_block = format_join_contract_block(join_contract)
+
                 step = state.get("sequential_step", 0)
                 sub_questions = state.get("sub_questions") or []
                 next_sub_q = (
@@ -640,22 +664,31 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     if isinstance(step, int) and 0 <= step < len(sub_questions)
                     else ""
                 )
-                suggested_genie_question = enrich_question_with_executed_literals(
-                    next_sub_q or "Continue the analysis using the prior result literals.",
-                    literal_package,
+                suggested_base = next_sub_q or (
+                    "Continue the analysis using the prior result literals."
+                )
+                suggested_genie_question = enrich_question_with_join_contract(
+                    enrich_question_with_executed_literals(
+                        suggested_base,
+                        literal_package,
+                    ),
+                    join_contract,
                 )
                 if suggested_genie_question:
                     plan["suggested_genie_question"] = suggested_genie_question
 
                 literal_guidance = ""
-                if literal_block:
+                if contract_block or literal_block:
                     literal_guidance = (
-                        f"\n- Prior warehouse results produced concrete literals. "
+                        f"\n- Prior steps produced a JOIN CONTRACT and/or concrete literals. "
                         f"You MUST paste them into the Genie question "
-                        f"(use suggested_genie_question or the block below).\n"
-                        f"- Do NOT ask Genie to rediscover top-N / prior keys.\n"
-                        f"\n{literal_block}\n"
+                        f"(use suggested_genie_question or the blocks below).\n"
+                        f"- Do NOT ask Genie to rediscover top-N / prior keys / time windows.\n"
                     )
+                    if contract_block:
+                        literal_guidance += f"\n{contract_block}\n"
+                    if literal_block and "EXECUTED RESULT LITERALS" not in (contract_block or ""):
+                        literal_guidance += f"\n{literal_block}\n"
 
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Sequential Mode):\n"
@@ -766,6 +799,14 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             result.get("genie_conversation_ids"),
         ) or None
 
+        from ..utils.join_contract import merge_join_contracts
+
+        updated_join_contract = merge_join_contracts(
+            state.get("join_contract"),
+            plan.get("join_contract"),
+            result.get("join_contract"),
+        )
+
         sql_queries, query_labels = extract_sql_queries_from_agent_result(
             result, "sql_synthesis_genie"
         )
@@ -784,6 +825,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 "sql_query": sql_queries[0],
                 "has_sql": True,
                 "genie_conversation_ids": updated_conversation_ids,
+                "join_contract": updated_join_contract,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,
@@ -807,6 +849,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 **_preserved_as_execution_results(state),
                 "synthesis_error": "Cannot generate SQL query from Genie agent fragments",
                 "genie_conversation_ids": updated_conversation_ids,
+                "join_contract": updated_join_contract,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,

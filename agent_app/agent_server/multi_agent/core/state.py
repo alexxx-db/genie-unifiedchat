@@ -95,6 +95,8 @@ class GraphInput(TypedDict, total=False):
     genie_conversation_ids: Optional[Dict[str, str]]
     # Literals extracted from executed warehouse results for Genie follow-ups
     executed_result_literals: Optional[Dict[str, Any]]
+    # Shared cross-space join contract (entities/keys/time/metrics/sql_by_space)
+    join_contract: Optional[Dict[str, Any]]
     sql_query: Optional[str]
     sql_queries: Optional[List[str]]
     sql_query_labels: Optional[List[str]]
@@ -161,6 +163,8 @@ class AgentState(TypedDict):
     genie_conversation_ids: Optional[Dict[str, str]]
     # Literals extracted from executed warehouse results for Genie follow-ups
     executed_result_literals: Optional[Dict[str, Any]]
+    # Shared cross-space join contract (entities/keys/time/metrics/sql_by_space)
+    join_contract: Optional[Dict[str, Any]]
 
     # SQL Synthesis
     sql_query: Optional[str]
@@ -258,6 +262,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "dependency_edges": None,
         "genie_conversation_ids": None,
         "executed_result_literals": None,
+        "join_contract": None,
 
         # SQL fields (per-query)
         "sql_query": None,

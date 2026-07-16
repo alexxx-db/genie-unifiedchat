@@ -413,12 +413,24 @@ def planning_node(state: AgentState) -> dict:
     genie_execution_mode = plan.get("genie_execution_mode")
     dependency_edges = plan.get("dependency_edges") or []
 
+    from ..utils.join_contract import (
+        build_join_contract_from_plan,
+        join_contract_summary,
+    )
+
+    join_contract = build_join_contract_from_plan(
+        plan,
+        relevant_spaces=relevant_spaces_full,
+    )
+    plan["join_contract"] = join_contract
+
     if next_agent == "sql_synthesis_genie" and genie_route_plan:
         normalized_grp = normalize_genie_route_plan(genie_route_plan)
         print(
             "  Genie plan finalized: "
             f"{json.dumps(summarize_plan_for_logging(normalized_grp, genie_execution_mode or 'parallel'))}"
         )
+    print(f"  Join contract seeded: {json.dumps(join_contract_summary(join_contract))}")
 
     _debug_log(
         "planning.py:planning_node:route_decision",
@@ -430,6 +442,7 @@ def planning_node(state: AgentState) -> dict:
             "next_agent": next_agent,
             "genie_execution_mode": genie_execution_mode,
             "dependency_edge_count": len(dependency_edges),
+            "join_contract": join_contract_summary(join_contract),
             "relevant_space_count": len(relevant_spaces_full),
         },
     )
@@ -442,6 +455,7 @@ def planning_node(state: AgentState) -> dict:
         "requires_join": plan.get("requires_join", False),
         "genie_execution_mode": genie_execution_mode,
         "dependency_edges": dependency_edges,
+        "join_contract": join_contract_summary(join_contract),
     })
     
     sub_questions = plan.get("sub_questions", [])
@@ -460,6 +474,7 @@ def planning_node(state: AgentState) -> dict:
         "genie_route_plan": genie_route_plan,
         "genie_execution_mode": genie_execution_mode,
         "dependency_edges": dependency_edges,
+        "join_contract": join_contract,
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
         "relevant_spaces": relevant_spaces_full,
         "next_agent": next_agent,

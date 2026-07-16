@@ -545,6 +545,8 @@ class SQLSynthesisGenieAgent:
         self.name = "SQLSynthesisGenie"
         # Per-space Genie Conversation API ids for same-space retries/follow-ups.
         self._genie_conversation_ids: Dict[str, str] = {}
+        # Latest Genie batch results (for join_contract updates after tool calls).
+        self._last_genie_results: Dict[str, Any] = {}
         
         # Create Genie agents and their tool representations
         self.genie_agents = []
@@ -565,6 +567,10 @@ class SQLSynthesisGenieAgent:
     def get_conversation_ids(self) -> Dict[str, str]:
         """Return a copy of cached Genie conversation_ids."""
         return dict(self._genie_conversation_ids)
+
+    def get_last_genie_results(self) -> Dict[str, Any]:
+        """Return the most recent parallel/DAG Genie result map."""
+        return dict(self._last_genie_results)
     
     def _create_genie_agent_tools(self):
         """
@@ -857,6 +863,32 @@ class SQLSynthesisGenieAgent:
                         "waves": plan_summary["waves"],
                         "dependencies": plan_summary["dependencies"],
                     }
+
+                from ..utils.join_contract import (
+                    build_join_contract_from_genie_results,
+                    format_join_contract_block,
+                )
+
+                join_contract = build_join_contract_from_genie_results(
+                    results,
+                    relevant_spaces=self.relevant_spaces,
+                    dependency_edges=plan_summary.get("dependency_edges"),
+                )
+                results["_join_contract"] = join_contract
+                contract_block = format_join_contract_block(join_contract)
+                if contract_block:
+                    results["_join_contract_block"] = contract_block
+                self._last_genie_results = {
+                    k: v for k, v in results.items() if not str(k).startswith("_") or k == "_genie_dag"
+                }
+                # Keep metadata keys too for downstream merge.
+                self._last_genie_results.update(
+                    {
+                        "_genie_conversation_ids": results.get("_genie_conversation_ids"),
+                        "_genie_dag": results.get("_genie_dag"),
+                        "_join_contract": join_contract,
+                    }
+                )
                 return results
 
             except Exception as e:
@@ -872,9 +904,11 @@ class SQLSynthesisGenieAgent:
                 "Pass genie_execution_mode='dag' when steps have dependencies "
                 "(or omit and let depends_on infer DAG). "
                 "Returns per-space SQL/reasoning/answer/conversation_id plus "
-                "_genie_conversation_ids. On SAME-SPACE retry, pass conversation_ids "
+                "_genie_conversation_ids and _join_contract (entities/keys/time/metrics/"
+                "sql_by_space). On SAME-SPACE retry, pass conversation_ids "
                 "from the prior result (or use individual Genie tools with conversation_id). "
-                "Do not reuse a conversation_id across different spaces."
+                "Do not reuse a conversation_id across different spaces. "
+                "Use _join_contract when framing dependent follow-up questions."
             ),
             args_schema=ParallelGenieInput,
             func=invoke_parallel_genie_agents,
@@ -1102,6 +1136,12 @@ OUTPUT REQUIREMENTS:
         if self._genie_conversation_ids:
             plan_result["genie_conversation_ids"] = self.get_conversation_ids()
 
+        from ..utils.join_contract import format_join_contract_block
+
+        join_contract_block = format_join_contract_block(plan_result.get("join_contract"))
+        if join_contract_block:
+            plan_result["join_contract_block"] = join_contract_block
+
         print(f"\n{'='*80}")
         print("🤖 SQL Synthesis Agent - Starting (parallel/DAG Genie tool)...")
         print(f"{'='*80}")
@@ -1130,6 +1170,14 @@ OUTPUT REQUIREMENTS:
                 "the prior conversation instead of starting a new one.\n"
             )
 
+        contract_hint = ""
+        if join_contract_block:
+            contract_hint = (
+                "JOIN CONTRACT is available in the plan (and as join_contract_block). "
+                "When asking dependent Genie follow-ups, ground questions in that contract "
+                "(keys, time window, metrics, sql_by_space) instead of rediscovering context.\n"
+            )
+
         agent_message = {
             "messages": [
                 {
@@ -1139,7 +1187,7 @@ Generate a SQL query to answer the question according to the Query Plan:
 {json.dumps(plan_result, indent=2)}
 
 RECOMMENDED APPROACH:
-{dag_hint}{continuity_hint}
+{dag_hint}{continuity_hint}{contract_hint}
 Use invoke_parallel_genie_agents on genie_route_plan, then combine SQL fragments
 into final executable queries. On same-space retry, reuse conversation_ids.
 """
@@ -1207,11 +1255,25 @@ into final executable queries. On same-space retry, reuse conversation_ids.
             if not explanation:
                 explanation = final_content if not has_sql else "SQL query generated successfully by Genie agent tools."
             
+            from ..utils.join_contract import (
+                build_join_contract_from_genie_results,
+                merge_join_contracts,
+            )
+
+            join_contract = merge_join_contracts(
+                plan_result.get("join_contract"),
+                build_join_contract_from_genie_results(
+                    self.get_last_genie_results(),
+                    relevant_spaces=self.relevant_spaces,
+                    dependency_edges=plan_result.get("dependency_edges"),
+                ),
+            )
             return {
                 "sql": sql_query,
                 "explanation": explanation,
                 "has_sql": has_sql,
                 "genie_conversation_ids": self.get_conversation_ids(),
+                "join_contract": join_contract,
             }
             
         except Exception as e:
@@ -1226,6 +1288,7 @@ into final executable queries. On same-space retry, reuse conversation_ids.
                 "explanation": f"SQL synthesis failed: {str(e)}",
                 "has_sql": False,
                 "genie_conversation_ids": self.get_conversation_ids(),
+                "join_contract": plan_result.get("join_contract"),
             }
     
     def __call__(
