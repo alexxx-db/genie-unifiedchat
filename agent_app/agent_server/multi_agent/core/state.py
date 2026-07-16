@@ -91,6 +91,8 @@ class GraphInput(TypedDict, total=False):
     genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
     # Planner DAG edges: [{from, to}, ...]
     dependency_edges: Optional[List[Dict[str, str]]]
+    # Per-space Genie Conversation API ids for same-space retries
+    genie_conversation_ids: Optional[Dict[str, str]]
     sql_query: Optional[str]
     sql_queries: Optional[List[str]]
     sql_query_labels: Optional[List[str]]
@@ -153,6 +155,8 @@ class AgentState(TypedDict):
     genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
     # Planner DAG edges: [{from, to}, ...]
     dependency_edges: Optional[List[Dict[str, str]]]
+    # Per-space Genie Conversation API ids for same-space retries
+    genie_conversation_ids: Optional[Dict[str, str]]
 
     # SQL Synthesis
     sql_query: Optional[str]
@@ -248,6 +252,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "genie_route_plan": None,
         "genie_execution_mode": None,
         "dependency_edges": None,
+        "genie_conversation_ids": None,
 
         # SQL fields (per-query)
         "sql_query": None,

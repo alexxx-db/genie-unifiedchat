@@ -12,14 +12,17 @@ from agent_server.multi_agent.utils.genie_route_dag import (
     dependency_edges_from_plan,
     enrich_question_with_context,
     ensure_linear_dependencies,
+    extract_conversation_ids,
     finalize_planner_genie_plan,
     format_inject_block,
     legacy_question_map,
+    merge_conversation_ids,
     normalize_dependency_edges,
     normalize_genie_route_plan,
     query_suggests_staged_dependencies,
     questions_for_wave,
     resolve_genie_execution_mode,
+    resolve_space_conversation_id,
 )
 
 
@@ -309,3 +312,51 @@ def test_finalize_planner_keeps_independent_parallel():
     assert finalized["dependency_edges"] == []
     assert finalized["genie_route_plan"]["members"]["depends_on"] == []
     assert finalized["genie_route_plan"]["pharmacy"]["depends_on"] == []
+
+
+def test_extract_and_merge_conversation_ids():
+    results = {
+        "space_a": {"conversation_id": "conv-a", "sql": "SELECT 1", "success": True},
+        "space_b": {"conversation_id": "", "error": "failed", "success": False},
+        "_genie_dag": {"mode": "dag"},
+    }
+    extracted = extract_conversation_ids(results)
+    assert extracted == {"space_a": "conv-a"}
+
+    merged = merge_conversation_ids(
+        {"space_a": "old-a", "space_c": "conv-c"},
+        extracted,
+        {"space_a": "conv-a-new"},
+    )
+    assert merged == {
+        "space_a": "conv-a-new",
+        "space_c": "conv-c",
+    }
+
+
+def test_resolve_space_conversation_id_prefers_explicit():
+    cached = {"space_a": "cached-a"}
+    assert (
+        resolve_space_conversation_id(
+            "space_a",
+            explicit="explicit-a",
+            cached=cached,
+        )
+        == "explicit-a"
+    )
+    assert (
+        resolve_space_conversation_id(
+            "space_a",
+            explicit=None,
+            cached=cached,
+        )
+        == "cached-a"
+    )
+    assert (
+        resolve_space_conversation_id(
+            "space_b",
+            explicit="  ",
+            cached=cached,
+        )
+        is None
+    )

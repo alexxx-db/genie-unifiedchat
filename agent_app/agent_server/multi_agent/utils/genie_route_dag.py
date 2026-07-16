@@ -471,6 +471,53 @@ def ensure_linear_dependencies(
     return updated
 
 
+def extract_conversation_ids(
+    results: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Pull non-empty per-space Genie conversation_ids from a result map."""
+    if not results or not isinstance(results, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for space_id, payload in results.items():
+        if str(space_id).startswith("_"):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        cid = str(payload.get("conversation_id") or "").strip()
+        if cid:
+            out[str(space_id)] = cid
+    return out
+
+
+def merge_conversation_ids(
+    *maps: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Left-to-right merge; later non-empty values win."""
+    merged: Dict[str, str] = {}
+    for mapping in maps:
+        if not mapping or not isinstance(mapping, dict):
+            continue
+        for space_id, cid in mapping.items():
+            value = str(cid or "").strip()
+            if value:
+                merged[str(space_id)] = value
+    return merged
+
+
+def resolve_space_conversation_id(
+    space_id: str,
+    *,
+    explicit: Optional[str] = None,
+    cached: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Prefer an explicit conversation_id, else a cached per-space id."""
+    for candidate in (explicit, (cached or {}).get(space_id)):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return None
+
+
 def finalize_planner_genie_plan(plan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Finalize planner Genie fields: mode, structured route plan, dependency_edges.
 

@@ -96,6 +96,7 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
         "genie_route_plan": state.get("genie_route_plan"),
         "genie_execution_mode": state.get("genie_execution_mode"),
         "dependency_edges": state.get("dependency_edges"),
+        "genie_conversation_ids": state.get("genie_conversation_ids"),
     }
 
 
@@ -554,12 +555,19 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     genie_route_plan = context.get("genie_route_plan") or plan.get("genie_route_plan", {})
     genie_execution_mode = context.get("genie_execution_mode") or plan.get("genie_execution_mode")
     dependency_edges = context.get("dependency_edges") or plan.get("dependency_edges")
+    genie_conversation_ids = (
+        context.get("genie_conversation_ids")
+        or plan.get("genie_conversation_ids")
+        or state.get("genie_conversation_ids")
+    )
     if genie_route_plan:
         plan["genie_route_plan"] = genie_route_plan
     if genie_execution_mode:
         plan["genie_execution_mode"] = genie_execution_mode
     if dependency_edges is not None:
         plan["dependency_edges"] = dependency_edges
+    if genie_conversation_ids:
+        plan["genie_conversation_ids"] = genie_conversation_ids
 
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")
@@ -608,10 +616,19 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     f"- You MUST produce only ONE SQL query for this step."
                 )
             elif loop_reason == "retry":
+                prior_cids = plan.get("genie_conversation_ids") or {}
+                cid_lines = "\n".join(
+                    f"  - {sid}: {cid}" for sid, cid in prior_cids.items()
+                ) or "  - (none cached yet)"
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Retry Mode):\n"
                     f"Available Genie rooms:\n{room_info}\n"
                     f"- Retry only the FAILED query.\n"
+                    f"- Prefer SAME-SPACE Genie conversation continuity:\n"
+                    f"  Cached conversation_ids:\n{cid_lines}\n"
+                    f"- Pass conversation_ids on invoke_parallel_genie_agents, or "
+                    f"conversation_id on the individual Genie tool for that space.\n"
+                    f"- Only start a fresh conversation when switching to a different room.\n"
                     f"- Try rephrasing the question for the same room, or pick a different room.\n"
                     f"- Use individual Genie agent tools for precise control."
                 )
@@ -689,7 +706,14 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         sql_query = result.get("sql")
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
-        
+        from ..utils.genie_route_dag import merge_conversation_ids
+
+        updated_conversation_ids = merge_conversation_ids(
+            state.get("genie_conversation_ids"),
+            plan.get("genie_conversation_ids"),
+            result.get("genie_conversation_ids"),
+        ) or None
+
         sql_queries, query_labels = extract_sql_queries_from_agent_result(
             result, "sql_synthesis_genie"
         )
@@ -707,6 +731,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 "sql_query_labels": query_labels,
                 "sql_query": sql_queries[0],
                 "has_sql": True,
+                "genie_conversation_ids": updated_conversation_ids,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,
@@ -729,6 +754,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             return {
                 **_preserved_as_execution_results(state),
                 "synthesis_error": "Cannot generate SQL query from Genie agent fragments",
+                "genie_conversation_ids": updated_conversation_ids,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,

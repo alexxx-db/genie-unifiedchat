@@ -97,10 +97,13 @@ from databricks_langchain import (
 from ..utils.genie_route_dag import (
     build_context_packages,
     compute_execution_waves,
+    extract_conversation_ids,
     legacy_question_map,
+    merge_conversation_ids,
     normalize_genie_route_plan,
     questions_for_wave,
     resolve_genie_execution_mode,
+    resolve_space_conversation_id,
     summarize_plan_for_logging,
 )
 
@@ -540,6 +543,8 @@ class SQLSynthesisGenieAgent:
         self.llm = llm
         self.relevant_spaces = relevant_spaces
         self.name = "SQLSynthesisGenie"
+        # Per-space Genie Conversation API ids for same-space retries/follow-ups.
+        self._genie_conversation_ids: Dict[str, str] = {}
         
         # Create Genie agents and their tool representations
         self.genie_agents = []
@@ -549,6 +554,17 @@ class SQLSynthesisGenieAgent:
         
         # Create SQL synthesis agent with Genie agent tools
         self.sql_synthesis_agent = self._create_sql_synthesis_agent()
+
+    def seed_conversation_ids(self, conversation_ids: Optional[Dict[str, Any]]) -> None:
+        """Seed the per-space conversation cache (e.g. graph-level SQL retry)."""
+        self._genie_conversation_ids = merge_conversation_ids(
+            self._genie_conversation_ids,
+            conversation_ids,
+        )
+
+    def get_conversation_ids(self) -> Dict[str, str]:
+        """Return a copy of cached Genie conversation_ids."""
+        return dict(self._genie_conversation_ids)
     
     def _create_genie_agent_tools(self):
         """
@@ -590,23 +606,38 @@ class SQLSynthesisGenieAgent:
             # Define tool input schema using Pydantic
             class GenieToolInput(BaseModel):
                 question: str = Field(..., description="Natural-language query to run in the Genie Space")
-                conversation_id: Optional[str] = Field(None, description="Optional Genie conversation for continuity")
+                conversation_id: Optional[str] = Field(
+                    None,
+                    description=(
+                        "Genie conversation_id for SAME-SPACE continuity. "
+                        "On retry/reframe in this space, pass the conversation_id from the "
+                        "prior result. Omit only for a fresh conversation or a different space."
+                    ),
+                )
             
-            # Create tool function using factory pattern to capture agent
-            def make_genie_tool_call(agent):
-                """Factory function to capture agent in closure properly"""
+            # Create tool function using factory pattern to capture agent + space_id
+            def make_genie_tool_call(agent, sid: str):
+                """Factory function to capture agent/space in closure properly"""
                 def _genie_tool_call(question: str, conversation_id: Optional[str] = None):
                     """
                     StructuredTool with args_schema expects individual field arguments,
                     not a single Pydantic object.
                     """
+                    cid = resolve_space_conversation_id(
+                        sid,
+                        explicit=conversation_id,
+                        cached=self._genie_conversation_ids,
+                    )
                     # GenieAgent expects a LangChain-style message list
                     result = agent.invoke({
                         "messages": [{"role": "user", "content": question}],
-                        "conversation_id": conversation_id,
+                        "conversation_id": cid,
                     })
                     # Extract final output + optional context
-                    out = {"conversation_id": result.get("conversation_id")}
+                    out_cid = str(result.get("conversation_id") or "").strip() or cid
+                    out = {"conversation_id": out_cid or ""}
+                    if out_cid:
+                        self._genie_conversation_ids[sid] = out_cid
                     msgs = result["messages"]
                     def _get(name): 
                         return next((getattr(m, "content", "") for m in msgs if getattr(m, "name", None) == name), None)
@@ -624,10 +655,12 @@ class SQLSynthesisGenieAgent:
                 description=(
                     f"Use for governed analytics queries (NL→SQL) in {space_title}. "
                     f"{description}. "
-                    "Returns an answer and, when available, the generated SQL and reasoning."
+                    "Returns an answer and, when available, the generated SQL, reasoning, "
+                    "and conversation_id. For same-space retry/reframe, pass conversation_id "
+                    "from the prior call so Genie keeps multi-turn context."
                 ),
                 args_schema=GenieToolInput,
-                func=make_genie_tool_call(genie_agent),
+                func=make_genie_tool_call(genie_agent, space_id),
             )
             self.genie_agent_tools.append(genie_tool)
             self.space_id_to_tool[space_id] = genie_tool
@@ -665,6 +698,15 @@ class SQLSynthesisGenieAgent:
                     "step has depends_on. Distinct from UI SQL execution_mode."
                 ),
             )
+            conversation_ids: Optional[Dict[str, str]] = Field(
+                None,
+                description=(
+                    "Optional map of space_id → Genie conversation_id for same-space "
+                    "retries. On retry/reframe, pass ids from the prior tool result "
+                    "(_genie_conversation_ids or each space's conversation_id). "
+                    "Fresh first attempts may omit this."
+                ),
+            )
 
         def merge_genie_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
             """Normalize per-space Genie tool outputs into a unified result map."""
@@ -699,20 +741,25 @@ class SQLSynthesisGenieAgent:
 
         space_id_to_tool = dict(self.space_id_to_tool)
 
-        def _run_question_map(question_map: Dict[str, str]) -> Dict[str, Any]:
-            """Execute a flat space_id→question map concurrently."""
+        def _run_question_map(
+            question_map: Dict[str, str],
+            conversation_ids: Optional[Dict[str, str]] = None,
+        ) -> Dict[str, Any]:
+            """Execute a flat space_id→question map concurrently with optional continuity."""
             if not question_map:
                 return {}
 
+            cid_map = merge_conversation_ids(self._genie_conversation_ids, conversation_ids)
             parallel_tasks = {}
             for space_id, question in question_map.items():
                 tool = space_id_to_tool[space_id]
                 ctx = contextvars.copy_context()
+                prior_cid = cid_map.get(space_id)
 
-                def _safe_invoke(inp, sid=space_id, t=tool, c=ctx):
+                def _safe_invoke(inp, sid=space_id, t=tool, c=ctx, cid=prior_cid):
                     try:
                         q = inp.get(sid, "")
-                        out = c.run(t.func, question=q, conversation_id=None)
+                        out = c.run(t.func, question=q, conversation_id=cid)
                         if isinstance(out, dict):
                             return {"question": q, **out}
                         return {"question": q, "answer": str(out)}
@@ -720,6 +767,7 @@ class SQLSynthesisGenieAgent:
                         return {
                             "space_id": sid,
                             "question": inp.get(sid, ""),
+                            "conversation_id": cid or "",
                             "success": False,
                             "error": f"Genie call failed for {sid}: {task_err}",
                         }
@@ -728,11 +776,18 @@ class SQLSynthesisGenieAgent:
 
             parallel = RunnableParallel(**parallel_tasks)
             composed = parallel | RunnableLambda(merge_genie_outputs)
-            return composed.invoke(question_map)
+            results = composed.invoke(question_map)
+            # Persist any conversation_ids returned for later same-space retries.
+            self._genie_conversation_ids = merge_conversation_ids(
+                self._genie_conversation_ids,
+                extract_conversation_ids(results),
+            )
+            return results
 
         def invoke_parallel_genie_agents(
             genie_route_plan: Dict[str, Any],
             genie_execution_mode: Optional[str] = None,
+            conversation_ids: Optional[Dict[str, str]] = None,
         ) -> Dict[str, Any]:
             """
             Invoke Genie agents in parallel, or as dependency waves with structured inject.
@@ -751,13 +806,21 @@ class SQLSynthesisGenieAgent:
                         "available_space_ids": list(space_id_to_tool.keys()),
                     }
 
+                if conversation_ids:
+                    self.seed_conversation_ids(conversation_ids)
+
                 mode = resolve_genie_execution_mode(genie_execution_mode, normalized)
                 plan_summary = summarize_plan_for_logging(normalized, mode)
                 print(f"  Genie route execution: {json.dumps(plan_summary)}")
+                if self._genie_conversation_ids:
+                    print(
+                        "  Reusing Genie conversation_ids for spaces: "
+                        f"{sorted(self._genie_conversation_ids)}"
+                    )
 
                 if mode == "parallel":
                     question_map = legacy_question_map(normalized)
-                    results = _run_question_map(question_map)
+                    results = _run_question_map(question_map, conversation_ids)
                 else:
                     # DAG: run topological waves; inject compact upstream context
                     # into dependent Genie questions between waves.
@@ -770,7 +833,7 @@ class SQLSynthesisGenieAgent:
                             f"  🌊 Genie DAG wave {wave_idx}/{len(waves)}: "
                             f"{len(wave)} space(s) — {wave}"
                         )
-                        wave_results = _run_question_map(question_map)
+                        wave_results = _run_question_map(question_map, conversation_ids)
                         results.update(wave_results)
                         packages.update(build_context_packages(wave_results))
 
@@ -783,6 +846,9 @@ class SQLSynthesisGenieAgent:
                         str(v.get("error") or "unknown error") for v in space_results
                     )
                     return {"error": f"All Genie tasks failed: {errors}"}
+
+                # Continuity map for the orchestrator LLM / graph-level retries.
+                results["_genie_conversation_ids"] = self.get_conversation_ids()
 
                 # Attach lightweight DAG metadata for the orchestrator LLM.
                 if mode == "dag":
@@ -805,9 +871,10 @@ class SQLSynthesisGenieAgent:
                 "so upstream Genie answers/SQL/IDs are chained into downstream prompts. "
                 "Pass genie_execution_mode='dag' when steps have dependencies "
                 "(or omit and let depends_on infer DAG). "
-                "Returns per-space SQL/reasoning/answer; DAG runs also include _genie_dag metadata. "
-                "Retry failed spaces by calling again with reframed questions, "
-                "or use individual Genie agent tools for missing pieces."
+                "Returns per-space SQL/reasoning/answer/conversation_id plus "
+                "_genie_conversation_ids. On SAME-SPACE retry, pass conversation_ids "
+                "from the prior result (or use individual Genie tools with conversation_id). "
+                "Do not reuse a conversation_id across different spaces."
             ),
             args_schema=ParallelGenieInput,
             func=invoke_parallel_genie_agents,
@@ -882,15 +949,29 @@ Use only for granular retry / adaptive refinement after DAG/parallel failure.
 one Genie answer must feed another Genie's prompt. Do not flatten DAG plans
 into string-only maps — that drops dependencies.
 
-## DISASTER RECOVERY (DR):
+## DISASTER RECOVERY (DR) — SAME-SPACE conversation_id CONTINUITY:
 
-1. **First Attempt**: Try the planned parallel or DAG call AS IS
-2. **If fails**: Analyze the error message
+1. **First Attempt**: Try the planned parallel or DAG call AS IS (no conversation_ids)
+2. **If fails / empty SQL**: Analyze the error message
    - If agent says "I don't have information for X", remove X from the question
    - If agent returns empty/incomplete SQL, try rephrasing the question
-3. **Retry Once**: Call again with updated question(s); preserve depends_on for DAG
-4. **If still fails**: Try alternative Genie agents that might have the information
+3. **Retry Once (SAME SPACE)**: Prefer Genie Conversation API continuity
+   - From the prior tool result, collect each space's conversation_id
+     (or use `_genie_conversation_ids`)
+   - Re-call with reframed question(s) AND
+     `conversation_ids={space_id: prior_conversation_id}`
+   - Or call the individual Genie tool with `conversation_id` set
+   - Preserve depends_on for DAG retries
+   - Only omit conversation_id when switching to a *different* space
+4. **If still fails**: Try alternative Genie spaces (fresh conversation; no old conversation_id)
 5. **Final fallback**: Work with what you have and explain limitations
+
+## EXAMPLE SAME-SPACE RETRY:
+
+Step 1: invoke_parallel_genie_agents(...) → space_a returns conversation_id="abc"
+Step 2: space_a SQL empty → reframe question
+Step 3: invoke_parallel_genie_agents(..., conversation_ids={"space_a": "abc"})
+        OR call the individual Genie tool with conversation_id="abc"
 
 ## EXAMPLE DAG EXECUTION:
 
@@ -956,6 +1037,7 @@ OUTPUT REQUIREMENTS:
         self,
         genie_route_plan: Dict[str, Any],
         genie_execution_mode: Optional[str] = None,
+        conversation_ids: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Invoke Genie agents via the parallel/DAG tool (RunnableParallel waves).
@@ -969,6 +1051,7 @@ OUTPUT REQUIREMENTS:
         return parallel_tool.func(
             genie_route_plan=genie_route_plan,
             genie_execution_mode=genie_execution_mode,
+            conversation_ids=conversation_ids,
         )
     
     def synthesize_sql(
@@ -1014,6 +1097,11 @@ OUTPUT REQUIREMENTS:
             # Persist structured steps so the tool keeps depends_on/inject.
             plan_result["genie_route_plan"] = normalized
 
+        # Seed same-space Genie conversation continuity (graph-level retries).
+        self.seed_conversation_ids(plan_result.get("genie_conversation_ids"))
+        if self._genie_conversation_ids:
+            plan_result["genie_conversation_ids"] = self.get_conversation_ids()
+
         print(f"\n{'='*80}")
         print("🤖 SQL Synthesis Agent - Starting (parallel/DAG Genie tool)...")
         print(f"{'='*80}")
@@ -1033,6 +1121,15 @@ OUTPUT REQUIREMENTS:
                 "genie_execution_mode='parallel' for fastest fan-out.\n"
             )
 
+        continuity_hint = ""
+        if self._genie_conversation_ids:
+            continuity_hint = (
+                "SAME-SPACE RETRY: genie_conversation_ids are already available. "
+                "Pass them as conversation_ids on invoke_parallel_genie_agents "
+                "(or conversation_id on individual Genie tools) so Genie continues "
+                "the prior conversation instead of starting a new one.\n"
+            )
+
         agent_message = {
             "messages": [
                 {
@@ -1042,9 +1139,9 @@ Generate a SQL query to answer the question according to the Query Plan:
 {json.dumps(plan_result, indent=2)}
 
 RECOMMENDED APPROACH:
-{dag_hint}
+{dag_hint}{continuity_hint}
 Use invoke_parallel_genie_agents on genie_route_plan, then combine SQL fragments
-into final executable queries.
+into final executable queries. On same-space retry, reuse conversation_ids.
 """
                 }
             ]
@@ -1113,7 +1210,8 @@ into final executable queries.
             return {
                 "sql": sql_query,
                 "explanation": explanation,
-                "has_sql": has_sql
+                "has_sql": has_sql,
+                "genie_conversation_ids": self.get_conversation_ids(),
             }
             
         except Exception as e:
@@ -1126,7 +1224,8 @@ into final executable queries.
             return {
                 "sql": None,
                 "explanation": f"SQL synthesis failed: {str(e)}",
-                "has_sql": False
+                "has_sql": False,
+                "genie_conversation_ids": self.get_conversation_ids(),
             }
     
     def __call__(
