@@ -394,35 +394,31 @@ def planning_node(state: AgentState) -> dict:
         next_agent = "sql_synthesis_table"
         print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
 
-    # Normalize genie_route_plan + resolve genie_execution_mode (distinct from UI
-    # SQL execution_mode). Keep structured depends_on/inject for DAG chaining.
+    # Finalize Genie planner fields (mode, structured route plan, dependency_edges).
+    # Distinct from UI SQL execution_mode. Idempotent with planning_agent finalize.
     from ..utils.genie_route_dag import (
+        finalize_planner_genie_plan,
         normalize_genie_route_plan,
-        resolve_genie_execution_mode,
         summarize_plan_for_logging,
     )
 
+    plan = dict(plan)
+    # Align join_strategy with the resolved route before finalize so Genie
+    # fields are cleared on table_route (including UI force overrides).
+    plan["join_strategy"] = (
+        "genie_route" if next_agent == "sql_synthesis_genie" else "table_route"
+    )
+    plan = finalize_planner_genie_plan(plan)
     genie_route_plan = plan.get("genie_route_plan")
-    genie_execution_mode = None
+    genie_execution_mode = plan.get("genie_execution_mode")
+    dependency_edges = plan.get("dependency_edges") or []
+
     if next_agent == "sql_synthesis_genie" and genie_route_plan:
         normalized_grp = normalize_genie_route_plan(genie_route_plan)
-        genie_execution_mode = resolve_genie_execution_mode(
-            plan.get("genie_execution_mode"),
-            normalized_grp,
-        )
-        genie_route_plan = normalized_grp or genie_route_plan
-        plan = dict(plan)
-        plan["genie_route_plan"] = genie_route_plan
-        plan["genie_execution_mode"] = genie_execution_mode
         print(
-            "  Genie plan normalized: "
-            f"{json.dumps(summarize_plan_for_logging(normalized_grp, genie_execution_mode))}"
+            "  Genie plan finalized: "
+            f"{json.dumps(summarize_plan_for_logging(normalized_grp, genie_execution_mode or 'parallel'))}"
         )
-    elif next_agent != "sql_synthesis_genie":
-        genie_route_plan = None
-        plan = dict(plan)
-        plan["genie_route_plan"] = None
-        plan["genie_execution_mode"] = None
 
     _debug_log(
         "planning.py:planning_node:route_decision",
@@ -433,6 +429,7 @@ def planning_node(state: AgentState) -> dict:
             "resolved_join_strategy": join_strategy,
             "next_agent": next_agent,
             "genie_execution_mode": genie_execution_mode,
+            "dependency_edge_count": len(dependency_edges),
             "relevant_space_count": len(relevant_spaces_full),
         },
     )
@@ -444,6 +441,7 @@ def planning_node(state: AgentState) -> dict:
         "strategy": join_strategy,
         "requires_join": plan.get("requires_join", False),
         "genie_execution_mode": genie_execution_mode,
+        "dependency_edges": dependency_edges,
     })
     
     sub_questions = plan.get("sub_questions", [])
@@ -461,6 +459,7 @@ def planning_node(state: AgentState) -> dict:
         "execution_plan": plan.get("execution_plan", ""),
         "genie_route_plan": genie_route_plan,
         "genie_execution_mode": genie_execution_mode,
+        "dependency_edges": dependency_edges,
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
         "relevant_spaces": relevant_spaces_full,
         "next_agent": next_agent,

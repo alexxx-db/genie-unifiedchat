@@ -22,7 +22,7 @@ Supports legacy ``{space_id: question_str}`` plans and structured steps::
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 VALID_INJECT_FIELDS = ("filters", "ids", "sql_preview", "answer_summary")
 DEFAULT_INJECT_FIELDS = list(VALID_INJECT_FIELDS)
@@ -326,4 +326,203 @@ def summarize_plan_for_logging(
             sid: list(step.get("depends_on") or [])
             for sid, step in normalized_plan.items()
         },
+        "dependency_edges": dependency_edges_from_plan(normalized_plan),
     }
+
+
+# ---------------------------------------------------------------------------
+# Planner finalize: execution_mode + dependency_edges (P0)
+# ---------------------------------------------------------------------------
+
+# Patterns where later Genie questions typically need concrete values from
+# earlier ones (top-N → details, find codes → lookup, etc.).
+_STAGED_DEPENDENCY_PATTERNS = (
+    r"\band their\b",
+    r"\band its\b",
+    r"\bfor those\b",
+    r"\bfor these\b",
+    r"\bfor each of (them|those|these)\b",
+    r"\bthen\b",
+    r"\bfollowed by\b",
+    r"\bbased on (those|these|that|the (?:top|above|prior))\b",
+    r"\busing (those|these|that)\b",
+    r"\btop\s+\d+\b.+\b(and|,)\b",
+    r"\b(highest|lowest|most|least)\b.+\b(then|and their|for those)\b",
+    r"\b(find|identify|get)\b.+\b(look\s*up|lookup|describe|map)\b",
+)
+
+
+def query_suggests_staged_dependencies(
+    query: Optional[str] = None,
+    sub_questions: Optional[Sequence[str]] = None,
+) -> bool:
+    """Heuristic: does the natural-language ask imply staged Genie dependencies?"""
+    parts: List[str] = []
+    if query:
+        parts.append(str(query))
+    if sub_questions:
+        parts.extend(str(q) for q in sub_questions if q)
+    text = " ".join(parts).strip().lower()
+    if not text:
+        return False
+    return any(re.search(pat, text, flags=re.IGNORECASE) for pat in _STAGED_DEPENDENCY_PATTERNS)
+
+
+def dependency_edges_from_plan(
+    normalized_plan: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Derive ``[{from, to}, ...]`` edges from structured ``depends_on``."""
+    edges: List[Dict[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for sid, step in normalized_plan.items():
+        for dep in step.get("depends_on") or []:
+            key = (str(dep), str(sid))
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append({"from": key[0], "to": key[1]})
+    return edges
+
+
+def normalize_dependency_edges(
+    raw_edges: Any,
+    known_space_ids: Optional[Set[str]] = None,
+) -> List[Dict[str, str]]:
+    """Normalize planner-emitted dependency_edges; drop invalid / self edges."""
+    if not raw_edges:
+        return []
+    if not isinstance(raw_edges, list):
+        return []
+
+    known = known_space_ids
+    edges: List[Dict[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for item in raw_edges:
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("from") or item.get("source") or "").strip()
+        dst = str(item.get("to") or item.get("target") or "").strip()
+        if not src or not dst or src == dst:
+            continue
+        if known is not None and (src not in known or dst not in known):
+            continue
+        key = (src, dst)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append({"from": src, "to": dst})
+    return edges
+
+
+def apply_dependency_edges(
+    normalized_plan: Dict[str, Dict[str, Any]],
+    edges: Sequence[Dict[str, str]],
+) -> Dict[str, Dict[str, Any]]:
+    """Merge explicit edges into each step's ``depends_on`` (deduped)."""
+    if not edges:
+        return normalized_plan
+
+    updated = {
+        sid: {
+            **step,
+            "depends_on": list(step.get("depends_on") or []),
+        }
+        for sid, step in normalized_plan.items()
+    }
+    for edge in edges:
+        src = edge["from"]
+        dst = edge["to"]
+        if dst not in updated or src not in updated:
+            continue
+        deps = updated[dst]["depends_on"]
+        if src not in deps:
+            deps.append(src)
+    return updated
+
+
+def ensure_linear_dependencies(
+    normalized_plan: Dict[str, Dict[str, Any]],
+    space_order: Optional[Sequence[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """If there are no deps, chain spaces in order: each depends on the previous."""
+    if not normalized_plan or any(step.get("depends_on") for step in normalized_plan.values()):
+        return normalized_plan
+
+    if space_order:
+        ordered = [sid for sid in space_order if sid in normalized_plan]
+        # Append any spaces missing from the preferred order.
+        ordered.extend(sid for sid in normalized_plan if sid not in ordered)
+    else:
+        ordered = list(normalized_plan.keys())
+
+    if len(ordered) < 2:
+        return normalized_plan
+
+    updated = {
+        sid: {
+            **step,
+            "depends_on": list(step.get("depends_on") or []),
+            "inject": list(step.get("inject") or DEFAULT_INJECT_FIELDS),
+        }
+        for sid, step in normalized_plan.items()
+    }
+    for prev, curr in zip(ordered, ordered[1:]):
+        updated[curr]["depends_on"] = [prev]
+    return updated
+
+
+def finalize_planner_genie_plan(plan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Finalize planner Genie fields: mode, structured route plan, dependency_edges.
+
+    Idempotent. Clears Genie fields when join_strategy is not genie_route.
+    Applies staged-query heuristics when the LLM omitted depends_on / edges.
+    """
+    if not isinstance(plan, dict):
+        return {}
+
+    out = dict(plan)
+    join_strategy = (out.get("join_strategy") or "").strip().lower()
+
+    if join_strategy != "genie_route":
+        out["genie_route_plan"] = None
+        out["genie_execution_mode"] = None
+        out["dependency_edges"] = []
+        return out
+
+    raw_plan = out.get("genie_route_plan")
+    normalized = normalize_genie_route_plan(raw_plan)
+    if not normalized:
+        out["genie_route_plan"] = None
+        out["genie_execution_mode"] = None
+        out["dependency_edges"] = []
+        return out
+
+    # Merge planner-emitted edges into depends_on.
+    explicit_edges = normalize_dependency_edges(
+        out.get("dependency_edges"),
+        known_space_ids=set(normalized.keys()),
+    )
+    normalized = apply_dependency_edges(normalized, explicit_edges)
+
+    staged = query_suggests_staged_dependencies(
+        query=out.get("original_query") or out.get("execution_plan"),
+        sub_questions=out.get("sub_questions"),
+    )
+    has_deps = any(step.get("depends_on") for step in normalized.values())
+
+    # If the ask is clearly staged but the LLM left a flat parallel plan,
+    # materialize a linear dependency chain in relevant_space_ids order.
+    if staged and not has_deps and len(normalized) >= 2:
+        space_order = out.get("relevant_space_ids") or list(normalized.keys())
+        normalized = ensure_linear_dependencies(normalized, space_order)
+        has_deps = True
+
+    mode = resolve_genie_execution_mode(out.get("genie_execution_mode"), normalized)
+    if staged and len(normalized) >= 2:
+        mode = "dag"
+
+    edges = dependency_edges_from_plan(normalized)
+    out["genie_route_plan"] = normalized
+    out["genie_execution_mode"] = mode
+    out["dependency_edges"] = edges
+    return out

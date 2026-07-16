@@ -95,6 +95,7 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
         "relevant_spaces": state.get("relevant_spaces", []),
         "genie_route_plan": state.get("genie_route_plan"),
         "genie_execution_mode": state.get("genie_execution_mode"),
+        "dependency_edges": state.get("dependency_edges"),
     }
 
 
@@ -552,10 +553,13 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     plan = dict(context.get("plan") or {})
     genie_route_plan = context.get("genie_route_plan") or plan.get("genie_route_plan", {})
     genie_execution_mode = context.get("genie_execution_mode") or plan.get("genie_execution_mode")
+    dependency_edges = context.get("dependency_edges") or plan.get("dependency_edges")
     if genie_route_plan:
         plan["genie_route_plan"] = genie_route_plan
     if genie_execution_mode:
         plan["genie_execution_mode"] = genie_execution_mode
+    if dependency_edges is not None:
+        plan["dependency_edges"] = dependency_edges
 
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")

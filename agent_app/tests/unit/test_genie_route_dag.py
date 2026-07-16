@@ -6,12 +6,18 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent_server.multi_agent.utils.genie_route_dag import (
+    apply_dependency_edges,
     build_context_package,
     compute_execution_waves,
+    dependency_edges_from_plan,
     enrich_question_with_context,
+    ensure_linear_dependencies,
+    finalize_planner_genie_plan,
     format_inject_block,
     legacy_question_map,
+    normalize_dependency_edges,
     normalize_genie_route_plan,
+    query_suggests_staged_dependencies,
     questions_for_wave,
     resolve_genie_execution_mode,
 )
@@ -180,3 +186,126 @@ def test_legacy_question_map():
         }
     )
     assert legacy_question_map(normalized) == {"a": "Q-A", "b": "Q-B"}
+
+
+def test_query_suggests_staged_dependencies():
+    assert query_suggests_staged_dependencies(
+        "top 10 drugs and their diagnoses"
+    )
+    assert query_suggests_staged_dependencies(
+        "find ndc codes then look up descriptions"
+    )
+    assert query_suggests_staged_dependencies(
+        query="members",
+        sub_questions=["highest cost members", "then their claims"],
+    )
+    assert not query_suggests_staged_dependencies(
+        "how many active members? what is total lexapro cost?"
+    )
+
+
+def test_dependency_edges_helpers():
+    normalized = normalize_genie_route_plan(
+        {
+            "a": {"question": "q1", "depends_on": []},
+            "b": {"question": "q2", "depends_on": ["a"]},
+        }
+    )
+    edges = dependency_edges_from_plan(normalized)
+    assert edges == [{"from": "a", "to": "b"}]
+
+    cleaned = normalize_dependency_edges(
+        [{"from": "a", "to": "b"}, {"from": "a", "to": "a"}, {"from": "x", "to": "b"}],
+        known_space_ids={"a", "b"},
+    )
+    assert cleaned == [{"from": "a", "to": "b"}]
+
+    applied = apply_dependency_edges(
+        normalize_genie_route_plan({"a": "q1", "b": "q2"}),
+        [{"from": "a", "to": "b"}],
+    )
+    assert applied["b"]["depends_on"] == ["a"]
+
+
+def test_ensure_linear_dependencies_respects_order():
+    normalized = normalize_genie_route_plan(
+        {"b": "second", "a": "first", "c": "third"}
+    )
+    chained = ensure_linear_dependencies(normalized, ["a", "b", "c"])
+    assert chained["a"]["depends_on"] == []
+    assert chained["b"]["depends_on"] == ["a"]
+    assert chained["c"]["depends_on"] == ["b"]
+
+
+def test_finalize_planner_promotes_staged_flat_plan_to_dag():
+    plan = {
+        "original_query": "top 10 drugs and their diagnoses",
+        "join_strategy": "genie_route",
+        "relevant_space_ids": ["space_drugs", "space_dx"],
+        "sub_questions": ["top 10 drugs", "diagnoses for those drugs"],
+        "genie_execution_mode": "parallel",
+        "genie_route_plan": {
+            "space_drugs": "Top 10 drugs. Please limit to top 10 rows",
+            "space_dx": "Diagnoses. Please limit to top 10 rows",
+        },
+        "dependency_edges": [],
+    }
+    finalized = finalize_planner_genie_plan(plan)
+    assert finalized["genie_execution_mode"] == "dag"
+    assert finalized["genie_route_plan"]["space_dx"]["depends_on"] == ["space_drugs"]
+    assert finalized["dependency_edges"] == [
+        {"from": "space_drugs", "to": "space_dx"}
+    ]
+
+
+def test_finalize_planner_merges_explicit_edges():
+    plan = {
+        "original_query": "member demographics and pharmacy costs",
+        "join_strategy": "genie_route",
+        "relevant_space_ids": ["s1", "s2"],
+        "genie_execution_mode": "dag",
+        "genie_route_plan": {
+            "s1": {"question": "demographics", "depends_on": []},
+            "s2": {"question": "costs", "depends_on": []},
+        },
+        "dependency_edges": [{"from": "s1", "to": "s2"}],
+    }
+    finalized = finalize_planner_genie_plan(plan)
+    assert finalized["genie_route_plan"]["s2"]["depends_on"] == ["s1"]
+    assert finalized["dependency_edges"] == [{"from": "s1", "to": "s2"}]
+    assert finalized["genie_execution_mode"] == "dag"
+
+
+def test_finalize_planner_clears_genie_fields_for_table_route():
+    plan = {
+        "join_strategy": "table_route",
+        "genie_execution_mode": "dag",
+        "genie_route_plan": {"a": "q"},
+        "dependency_edges": [{"from": "a", "to": "b"}],
+    }
+    finalized = finalize_planner_genie_plan(plan)
+    assert finalized["genie_route_plan"] is None
+    assert finalized["genie_execution_mode"] is None
+    assert finalized["dependency_edges"] == []
+
+
+def test_finalize_planner_keeps_independent_parallel():
+    plan = {
+        "original_query": "How many active members? What is total lexapro cost?",
+        "join_strategy": "genie_route",
+        "relevant_space_ids": ["members", "pharmacy"],
+        "sub_questions": [
+            "How many active members?",
+            "What is total lexapro cost?",
+        ],
+        "genie_execution_mode": "parallel",
+        "genie_route_plan": {
+            "members": "Active member count. Please limit to top 10 rows",
+            "pharmacy": "Lexapro total cost. Please limit to top 10 rows",
+        },
+    }
+    finalized = finalize_planner_genie_plan(plan)
+    assert finalized["genie_execution_mode"] == "parallel"
+    assert finalized["dependency_edges"] == []
+    assert finalized["genie_route_plan"]["members"]["depends_on"] == []
+    assert finalized["genie_route_plan"]["pharmacy"]["depends_on"] == []

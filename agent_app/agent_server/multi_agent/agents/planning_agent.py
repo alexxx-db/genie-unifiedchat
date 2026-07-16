@@ -187,6 +187,7 @@ class PlanningAgent:
             - execution_plan: Brief description of execution plan
             - genie_execution_mode: "parallel" or "dag" (genie_route only; not UI SQL execution_mode)
             - genie_route_plan: space_id → question string OR structured DAG step
+            - dependency_edges: [{from, to}, ...] for genie_route DAG (optional; derived if omitted)
         """
         # Use original_query if provided, otherwise use query as original
         original_query_display = original_query if original_query is not None else query
@@ -221,6 +222,7 @@ class PlanningAgent:
                 "execution_plan": "Brief description of execution plan",
                 "genie_execution_mode": None,
                 "genie_route_plan": None,
+                "dependency_edges": [],
             },
             indent=2,
         )
@@ -268,9 +270,10 @@ Break down the question and determine:
     - If Genie Route is selected from UI, you must use Genie Route and must create `genie_route_plan`
     - always populate the join_strategy field in the JSON output.
 5. Execution plan: A brief description of how to execute the plan.
-6. For genie_route ONLY — choose genie_execution_mode and genie_route_plan shape:
+6. For genie_route ONLY — choose genie_execution_mode, genie_route_plan, and dependency_edges:
     - "parallel": Independent space questions (no answer from space A needed to ask space B).
       Use flat map: {{"space_id_1": "partial_question_1", "space_id_2": "partial_question_2"}}
+      Set dependency_edges to [].
     - "dag": Staged / dependent questions where later Genie prompts need concrete values
       from earlier Genie answers (IDs, filters, top-N lists, SQL predicates).
       Examples that REQUIRE dag: "top 10 drugs and their diagnoses",
@@ -279,10 +282,13 @@ Break down the question and determine:
 {dag_example}
       - depends_on: list of upstream space_ids (empty for roots)
       - inject: subset of ["ids","filters","sql_preview","answer_summary"] to chain forward
-    - For table_route: genie_route_plan=null and genie_execution_mode=null
+      - ALSO set dependency_edges, e.g. [{{"from": "space_id_1", "to": "space_id_2"}}]
+        (must match depends_on; do not invent spaces not in relevant_space_ids)
+    - For table_route: genie_route_plan=null, genie_execution_mode=null, dependency_edges=[]
     - Each question should be scoped to that space
     - Add "Please limit to top 10 rows" to each question
     - Prefer dag over parallel when one space's results constrain another space's question
+    - Never mark staged top-N / "and their" / "for those" questions as parallel
 {forced_route_instructions}
 
 Return your analysis as JSON:
@@ -312,9 +318,11 @@ Only return valid JSON, no explanations.
         # Remove any trailing commas before ] or }
         json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
         
+        from ..utils.genie_route_dag import finalize_planner_genie_plan
+
         try:
             plan_result = json.loads(json_str)
-            return plan_result
+            return finalize_planner_genie_plan(plan_result)
         except json.JSONDecodeError as e:
             print(f"❌ Planning JSON parsing error at position {e.pos}: {e.msg}")
             print(f"Raw content (first 500 chars):\n{content[:500]}")
@@ -328,8 +336,8 @@ Only return valid JSON, no explanations.
                 json_str_clean = re.sub(r',(\s*[}\]])', r'\1', json_str_clean)
                 plan_result = json.loads(json_str_clean)
                 print("✓ Successfully parsed JSON after aggressive cleaning")
-                return plan_result
-            except:
+                return finalize_planner_genie_plan(plan_result)
+            except Exception:
                 raise e  # Re-raise original error
     
     def __call__(self, query: str) -> Dict[str, Any]:
