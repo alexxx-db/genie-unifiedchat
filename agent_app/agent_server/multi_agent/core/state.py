@@ -93,6 +93,8 @@ class GraphInput(TypedDict, total=False):
     dependency_edges: Optional[List[Dict[str, str]]]
     # Per-space Genie Conversation API ids for same-space retries
     genie_conversation_ids: Optional[Dict[str, str]]
+    # Literals extracted from executed warehouse results for Genie follow-ups
+    executed_result_literals: Optional[Dict[str, Any]]
     sql_query: Optional[str]
     sql_queries: Optional[List[str]]
     sql_query_labels: Optional[List[str]]
@@ -157,6 +159,8 @@ class AgentState(TypedDict):
     dependency_edges: Optional[List[Dict[str, str]]]
     # Per-space Genie Conversation API ids for same-space retries
     genie_conversation_ids: Optional[Dict[str, str]]
+    # Literals extracted from executed warehouse results for Genie follow-ups
+    executed_result_literals: Optional[Dict[str, Any]]
 
     # SQL Synthesis
     sql_query: Optional[str]
@@ -253,6 +257,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "genie_execution_mode": None,
         "dependency_edges": None,
         "genie_conversation_ids": None,
+        "executed_result_literals": None,
 
         # SQL fields (per-query)
         "sql_query": None,

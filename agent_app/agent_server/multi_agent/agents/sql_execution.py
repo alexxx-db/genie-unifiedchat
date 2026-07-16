@@ -70,6 +70,11 @@ def _build_sequential_feedback(
     total: int,
 ) -> str:
     """Build structured feedback for sequential continuation."""
+    from ..utils.executed_result_literals import (
+        build_executed_literal_package,
+        format_executed_literals_block,
+    )
+
     parts = [f"## Sequential Step {step + 1} of {total}\n"]
     if preserved:
         parts.append("### Previous results:")
@@ -101,6 +106,19 @@ def _build_sequential_feedback(
                 f"SQL: {sql}\n"
                 f"Columns: {', '.join(cols)}\n"
                 f"Data: {sample_json}\n"
+            )
+
+        literal_package = build_executed_literal_package(preserved)
+        literal_block = format_executed_literals_block(literal_package)
+        if literal_block:
+            parts.append("### Concrete literals for the next Genie / SQL question:")
+            parts.append(literal_block)
+            parts.append(
+                "\n### Instructions for next step:\n"
+                "- Embed these concrete literals in the next Genie question or SQL filter "
+                "(e.g. IN lists / exact codes).\n"
+                "- Do NOT ask Genie to rediscover the set already returned above "
+                "(for example, do not re-ask for 'top N' if those IDs are already listed)."
             )
     return "\n".join(parts)
 
@@ -454,15 +472,20 @@ def _execute_sequential(
                 "execution_results": preserved,
                 "execution_result": preserved[0] if preserved else None,
                 "preserved_results": [],
+                "executed_result_literals": None,
                 "sql_retry_feedback": None,
                 "loop_reason": None,
                 "next_agent": "summarize",
                 "messages": [SystemMessage(content=f"Sequential complete: {len(preserved)} result sets")],
             }
+        from ..utils.executed_result_literals import build_executed_literal_package
+
+        literal_package = build_executed_literal_package(preserved)
         return {
             "preserved_results": preserved,
             "sequential_step": next_step,
             "sql_retry_count": 0,
+            "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
             "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
             "loop_reason": "sequential_next",
             "next_agent": route or "summarize",
@@ -488,15 +511,20 @@ def _execute_sequential(
             "execution_results": preserved,
             "execution_result": preserved[0] if preserved else None,
             "preserved_results": [],
+            "executed_result_literals": None,
             "sql_retry_feedback": None,
             "loop_reason": None,
             "next_agent": "summarize",
             "messages": [SystemMessage(content=f"Sequential complete (with skipped failures): {len(preserved)} result sets")],
         }
+    from ..utils.executed_result_literals import build_executed_literal_package
+
+    literal_package = build_executed_literal_package(preserved)
     return {
         "preserved_results": preserved,
         "sequential_step": next_step,
         "sql_retry_count": 0,
+        "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
         "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
         "loop_reason": "sequential_next",
         "next_agent": route or "summarize",

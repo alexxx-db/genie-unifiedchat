@@ -84,7 +84,8 @@ def extract_synthesis_table_context(state: AgentState) -> dict:
     """Extract minimal context for table-based SQL synthesis."""
     return {
         "plan": state.get("plan", {}),
-        "relevant_space_ids": state.get("relevant_space_ids", [])
+        "relevant_space_ids": state.get("relevant_space_ids", []),
+        "executed_result_literals": state.get("executed_result_literals"),
     }
 
 
@@ -97,6 +98,7 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
         "genie_execution_mode": state.get("genie_execution_mode"),
         "dependency_edges": state.get("dependency_edges"),
         "genie_conversation_ids": state.get("genie_conversation_ids"),
+        "executed_result_literals": state.get("executed_result_literals"),
     }
 
 
@@ -278,6 +280,9 @@ def _build_loop_prompt_prefix(state: AgentState) -> Optional[str]:
             f"- If the next sub-question is already answered by prior results, skip it.\n"
             f"- If you can write a better query using data from prior results "
             f"(e.g., exact codes, IDs), do so.\n"
+            f"- When EXECUTED RESULT LITERALS are present, embed those concrete "
+            f"values in the next Genie question / SQL filter; do not rediscover "
+            f"the prior result set.\n"
             f"- If ALL remaining questions are already addressed, return the "
             f"special marker: NO_MORE_QUERIES\n"
             f"- Otherwise, generate ONLY ONE query for the most relevant "
@@ -560,6 +565,11 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         or plan.get("genie_conversation_ids")
         or state.get("genie_conversation_ids")
     )
+    executed_result_literals = (
+        context.get("executed_result_literals")
+        or plan.get("executed_result_literals")
+        or state.get("executed_result_literals")
+    )
     if genie_route_plan:
         plan["genie_route_plan"] = genie_route_plan
     if genie_execution_mode:
@@ -568,6 +578,8 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         plan["dependency_edges"] = dependency_edges
     if genie_conversation_ids:
         plan["genie_conversation_ids"] = genie_conversation_ids
+    if executed_result_literals:
+        plan["executed_result_literals"] = executed_result_literals
 
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")
@@ -606,6 +618,45 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 plan["genie_execution_mode"] = None
                 print("  Nulled genie_route_plan for sequential step — LLM will use individual tools")
 
+                from ..utils.executed_result_literals import (
+                    build_executed_literal_package,
+                    enrich_question_with_executed_literals,
+                    format_executed_literals_block,
+                )
+
+                literal_package = (
+                    plan.get("executed_result_literals")
+                    or state.get("executed_result_literals")
+                    or build_executed_literal_package(state.get("preserved_results"))
+                )
+                literal_block = format_executed_literals_block(literal_package)
+                if literal_package and literal_package.get("has_literals"):
+                    plan["executed_result_literals"] = literal_package
+
+                step = state.get("sequential_step", 0)
+                sub_questions = state.get("sub_questions") or []
+                next_sub_q = (
+                    sub_questions[step]
+                    if isinstance(step, int) and 0 <= step < len(sub_questions)
+                    else ""
+                )
+                suggested_genie_question = enrich_question_with_executed_literals(
+                    next_sub_q or "Continue the analysis using the prior result literals.",
+                    literal_package,
+                )
+                if suggested_genie_question:
+                    plan["suggested_genie_question"] = suggested_genie_question
+
+                literal_guidance = ""
+                if literal_block:
+                    literal_guidance = (
+                        f"\n- Prior warehouse results produced concrete literals. "
+                        f"You MUST paste them into the Genie question "
+                        f"(use suggested_genie_question or the block below).\n"
+                        f"- Do NOT ask Genie to rediscover top-N / prior keys.\n"
+                        f"\n{literal_block}\n"
+                    )
+
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Sequential Mode):\n"
                     f"Available Genie rooms:\n{room_info}\n"
@@ -614,6 +665,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     f"- Choose the room most relevant to the adapted question content.\n"
                     f"  The adapted question may need a DIFFERENT room than originally assigned.\n"
                     f"- You MUST produce only ONE SQL query for this step."
+                    f"{literal_guidance}"
                 )
             elif loop_reason == "retry":
                 prior_cids = plan.get("genie_conversation_ids") or {}
