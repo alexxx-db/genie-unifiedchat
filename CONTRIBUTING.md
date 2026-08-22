@@ -16,8 +16,8 @@ This repository has two active workflows:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/alexxx-db/genie-unifiedchat.git
-   cd genie-unifiedchat
+   git clone https://github.com/alexxx-db/genie-juan.git
+   cd genie-juan
    ```
 
 2. Install the app workspace dependencies:
