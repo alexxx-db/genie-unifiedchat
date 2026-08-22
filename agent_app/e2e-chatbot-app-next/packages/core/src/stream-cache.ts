@@ -13,6 +13,12 @@ import { Readable } from 'node:stream';
 interface CachedStream {
   chatId: string;
   streamId: string;
+  /**
+   * User id of the session that created the stream. Used to authorize stream
+   * resumption for temporary chats that are not yet persisted in the DB (where
+   * the normal chat-access check reports `not_found`).
+   */
+  ownerId: string | null;
   cache: CacheableStream<string>;
   createdAt: number;
   lastAccessedAt: number;
@@ -68,16 +74,19 @@ export class StreamCache {
     streamId,
     chatId,
     stream,
+    ownerId = null,
   }: {
     streamId: string;
     chatId: string;
     stream: ReadableStream<string>;
+    ownerId?: string | null;
   }) {
     console.log('[StreamCache] storeStream', streamId, chatId);
     this.activeStreams.set(chatId, streamId);
     const entry = {
       chatId,
       streamId,
+      ownerId,
       cache: makeCacheableStream({
         source: stream,
         onPush: () => {
@@ -106,6 +115,16 @@ export class StreamCache {
    */
   getActiveStreamId(chatId: string): string | null {
     return this.activeStreams.get(chatId) ?? null;
+  }
+
+  /**
+   * Get the owner (creating user id) of the active stream for a chat, if any.
+   * Returns null when there is no active stream or the owner was not recorded.
+   */
+  getActiveStreamOwnerId(chatId: string): string | null {
+    const streamId = this.activeStreams.get(chatId);
+    if (!streamId) return null;
+    return this.cache.get(streamId)?.ownerId ?? null;
   }
 
   /**

@@ -29,13 +29,13 @@ Example usage:
 """
 
 import json
+import logging
 import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
-from uuid import uuid4
 
 from langchain_core.messages import SystemMessage
 from langgraph.config import get_stream_writer
@@ -43,25 +43,16 @@ from langgraph.config import get_stream_writer
 from ..core.state import AgentState
 
 
-_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+logger = logging.getLogger(__name__)
 
 
 def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
-    try:
-        payload = {
-            "sessionId": "5f14c7",
-            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "runId": "run1",
-            "hypothesisId": "route-debug",
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
+    """Emit routing/planning debug info via the standard logger.
+
+    Previously this wrote to a hard-coded developer path on every call, which
+    leaked routing data locally and silently failed everywhere else.
+    """
+    logger.debug("%s | %s | %s", location, message, data or {})
 
 
 # ==============================================================================
@@ -403,6 +394,44 @@ def planning_node(state: AgentState) -> dict:
         next_agent = "sql_synthesis_table"
         print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
 
+    # Finalize Genie planner fields (mode, structured route plan, dependency_edges).
+    # Distinct from UI SQL execution_mode. Idempotent with planning_agent finalize.
+    from ..utils.genie_route_dag import (
+        finalize_planner_genie_plan,
+        normalize_genie_route_plan,
+        summarize_plan_for_logging,
+    )
+
+    plan = dict(plan)
+    # Align join_strategy with the resolved route before finalize so Genie
+    # fields are cleared on table_route (including UI force overrides).
+    plan["join_strategy"] = (
+        "genie_route" if next_agent == "sql_synthesis_genie" else "table_route"
+    )
+    plan = finalize_planner_genie_plan(plan)
+    genie_route_plan = plan.get("genie_route_plan")
+    genie_execution_mode = plan.get("genie_execution_mode")
+    dependency_edges = plan.get("dependency_edges") or []
+
+    from ..utils.join_contract import (
+        build_join_contract_from_plan,
+        join_contract_summary,
+    )
+
+    join_contract = build_join_contract_from_plan(
+        plan,
+        relevant_spaces=relevant_spaces_full,
+    )
+    plan["join_contract"] = join_contract
+
+    if next_agent == "sql_synthesis_genie" and genie_route_plan:
+        normalized_grp = normalize_genie_route_plan(genie_route_plan)
+        print(
+            "  Genie plan finalized: "
+            f"{json.dumps(summarize_plan_for_logging(normalized_grp, genie_execution_mode or 'parallel'))}"
+        )
+    print(f"  Join contract seeded: {json.dumps(join_contract_summary(join_contract))}")
+
     _debug_log(
         "planning.py:planning_node:route_decision",
         "planning route resolved",
@@ -411,12 +440,23 @@ def planning_node(state: AgentState) -> dict:
             "plan_join_strategy": plan.get("join_strategy"),
             "resolved_join_strategy": join_strategy,
             "next_agent": next_agent,
+            "genie_execution_mode": genie_execution_mode,
+            "dependency_edge_count": len(dependency_edges),
+            "join_contract": join_contract_summary(join_contract),
             "relevant_space_count": len(relevant_spaces_full),
         },
     )
     
     # Emit plan formulation result
-    writer({"type": "plan_formulation", "force_route": force_route, "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
+    writer({
+        "type": "plan_formulation",
+        "force_route": force_route,
+        "strategy": join_strategy,
+        "requires_join": plan.get("requires_join", False),
+        "genie_execution_mode": genie_execution_mode,
+        "dependency_edges": dependency_edges,
+        "join_contract": join_contract_summary(join_contract),
+    })
     
     sub_questions = plan.get("sub_questions", [])
     
@@ -431,7 +471,10 @@ def planning_node(state: AgentState) -> dict:
         "join_strategy": join_strategy,
         "join_strategy_route": next_agent,
         "execution_plan": plan.get("execution_plan", ""),
-        "genie_route_plan": plan.get("genie_route_plan"),
+        "genie_route_plan": genie_route_plan,
+        "genie_execution_mode": genie_execution_mode,
+        "dependency_edges": dependency_edges,
+        "join_contract": join_contract,
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
         "relevant_spaces": relevant_spaces_full,
         "next_agent": next_agent,

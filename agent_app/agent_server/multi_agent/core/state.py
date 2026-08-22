@@ -85,7 +85,18 @@ class GraphInput(TypedDict, total=False):
     requires_join: Optional[bool]
     join_strategy: Optional[str]
     execution_plan: Optional[str]
-    genie_route_plan: Optional[Dict[str, str]]
+    # space_id → question str OR structured {question, depends_on, inject}
+    genie_route_plan: Optional[Dict[str, Any]]
+    # Distinct from UI SQL execution_mode ("parallel"|"sequential")
+    genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
+    # Planner DAG edges: [{from, to}, ...]
+    dependency_edges: Optional[List[Dict[str, str]]]
+    # Per-space Genie Conversation API ids for same-space retries
+    genie_conversation_ids: Optional[Dict[str, str]]
+    # Literals extracted from executed warehouse results for Genie follow-ups
+    executed_result_literals: Optional[Dict[str, Any]]
+    # Shared cross-space join contract (entities/keys/time/metrics/sql_by_space)
+    join_contract: Optional[Dict[str, Any]]
     sql_query: Optional[str]
     sql_queries: Optional[List[str]]
     sql_query_labels: Optional[List[str]]
@@ -142,7 +153,18 @@ class AgentState(TypedDict):
     requires_join: Optional[bool]
     join_strategy: Optional[str]
     execution_plan: Optional[str]
-    genie_route_plan: Optional[Dict[str, str]]
+    # space_id → question str OR structured {question, depends_on, inject}
+    genie_route_plan: Optional[Dict[str, Any]]
+    # Distinct from UI SQL execution_mode ("parallel"|"sequential")
+    genie_execution_mode: Optional[str]  # "parallel" | "dag" | None
+    # Planner DAG edges: [{from, to}, ...]
+    dependency_edges: Optional[List[Dict[str, str]]]
+    # Per-space Genie Conversation API ids for same-space retries
+    genie_conversation_ids: Optional[Dict[str, str]]
+    # Literals extracted from executed warehouse results for Genie follow-ups
+    executed_result_literals: Optional[Dict[str, Any]]
+    # Shared cross-space join contract (entities/keys/time/metrics/sql_by_space)
+    join_contract: Optional[Dict[str, Any]]
 
     # SQL Synthesis
     sql_query: Optional[str]
@@ -236,6 +258,11 @@ def get_reset_state_template() -> Dict[str, Any]:
         "join_strategy": None,
         "execution_plan": None,
         "genie_route_plan": None,
+        "genie_execution_mode": None,
+        "dependency_edges": None,
+        "genie_conversation_ids": None,
+        "executed_result_literals": None,
+        "join_contract": None,
 
         # SQL fields (per-query)
         "sql_query": None,

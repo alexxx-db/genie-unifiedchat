@@ -1,4 +1,4 @@
-# Contributing to DBX-UnifiedChat
+# Contributing to Genie Juan
 
 Thank you for your interest in contributing to this project. Please use the workflow below when proposing changes.
 
@@ -16,8 +16,8 @@ This repository has two active workflows:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/databricks-solutions/dbx-unifiedchat.git
-   cd dbx-unifiedchat
+   git clone https://github.com/alexxx-db/genie-unifiedchat.git
+   cd genie-unifiedchat
    ```
 
 2. Install the app workspace dependencies:

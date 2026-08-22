@@ -7,8 +7,11 @@ NAICS, tickers, etc.) at once — faster and more reliable than web scraping.
 """
 
 import json
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _MAX_CODES_TO_LOOKUP = 30
@@ -59,9 +62,11 @@ _CODE_HINT_TOKENS = (
 import ssl
 import urllib.request
 
+# Use a default TLS context with certificate + hostname verification enabled.
+# These lookups hit public NLM/RxNav HTTPS endpoints, so there is no reason to
+# disable verification (doing so exposed responses to MITM tampering, and the
+# results are rendered into user-facing output).
 _SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 def _http_get_json(url: str, timeout: int = 5) -> dict:
@@ -76,8 +81,8 @@ def _api_lookup_ndc(value: str) -> str:
         name = d.get("ndcStatus", {}).get("conceptName", "")
         if name:
             return name.title()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("NDC code lookup failed for %r: %s", value, e)
     return ""
 
 
@@ -90,8 +95,8 @@ def _api_lookup_icd(value: str) -> str:
         )
         if d and len(d) >= 4 and d[3]:
             return d[3][0][1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("ICD-10 code lookup failed for %r: %s", value, e)
     return ""
 
 
@@ -104,8 +109,8 @@ def _api_lookup_cpt(value: str) -> str:
         )
         if d and len(d) >= 4 and d[3]:
             return d[3][0][1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("CPT/HCPCS code lookup failed for %r: %s", value, e)
     return ""
 
 #: ddgs currently NOT used in this project, keeping for backward compatibility.

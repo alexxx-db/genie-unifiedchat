@@ -1,7 +1,6 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "composite": true,
     "outDir": "./dist",
     "baseUrl": "../..",
     "paths": {
@@ -15,10 +14,5 @@
     }
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", "migrations"],
-  "references": [
-    { "path": "../core" },
-    { "path": "../auth" },
-    { "path": "../utils" }
-  ]
+  "exclude": ["node_modules", "dist", "migrations"]
 }

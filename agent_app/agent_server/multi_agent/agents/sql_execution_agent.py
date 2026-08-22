@@ -36,9 +36,107 @@ If you're not using resource registration, you can still manually configure:
 
 import re
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from datetime import date, datetime
 from decimal import Decimal
+
+
+# Expression types that represent read-only (non-mutating) SQL. Anything else
+# — INSERT/UPDATE/DELETE/MERGE/CREATE/DROP/ALTER/GRANT/TRUNCATE/… — is rejected
+# before it ever reaches the warehouse.
+_READ_ONLY_COMMAND_PREFIXES = ("SHOW", "DESCRIBE", "DESC", "EXPLAIN")
+
+
+def _is_read_only_sql(sql: str) -> Tuple[bool, str]:
+    """
+    Return (is_read_only, reason). Defense-in-depth guard so LLM-synthesized
+    SQL (which can be steered by prompt injection) cannot run mutating
+    statements even if the warehouse principal has write grants.
+
+    Uses sqlglot to parse each statement and allows only SELECT/WITH/UNION-style
+    read queries plus a small set of read-only commands (SHOW/DESCRIBE/EXPLAIN).
+    If parsing fails, falls back to a conservative first-keyword denylist.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    stripped = sql.strip()
+    if not stripped:
+        return False, "empty SQL"
+
+    # exp.SetOperation is the base of Union/Intersect/Except in sqlglot 30.x
+    # (Intersect/Except do NOT subclass Union). exp.Use / exp.Set are session
+    # context, not data mutations, so leading USE/SET before a query is allowed.
+    set_op = getattr(exp, "SetOperation", exp.Union)
+    read_only_types = (
+        exp.Select, set_op, exp.Union, exp.Subquery, exp.With,
+        exp.Describe, exp.Use, exp.Set,
+    )
+    write_keywords = {
+        "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT",
+        "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE",
+        "COPY", "CALL", "REFRESH", "OPTIMIZE", "VACUUM",
+    }
+
+    try:
+        statements = [s for s in sqlglot.parse(stripped, read="databricks") if s]
+    except Exception:
+        statements = None
+
+    if statements:
+        for stmt in statements:
+            if isinstance(stmt, read_only_types):
+                continue
+            if isinstance(stmt, exp.Command):
+                # sqlglot represents unsupported/uncommon statements as Command;
+                # allow only known read-only commands (SHOW/DESCRIBE/EXPLAIN).
+                name = (stmt.name or "").upper()
+                if name in _READ_ONLY_COMMAND_PREFIXES:
+                    continue
+                return False, f"non-read-only command: {name or type(stmt).__name__}"
+            return False, f"non-read-only statement: {type(stmt).__name__}"
+        return True, ""
+
+    # Parsing failed — fail closed. Reject if ANY write keyword appears as a
+    # standalone token (catches e.g. `WITH ... INSERT ...` where a leading read
+    # keyword would otherwise mask a trailing mutation), and only allow when the
+    # statement clearly begins with a read verb.
+    tokens = {t.upper() for t in re.findall(r"[A-Za-z_]+", stripped)}
+    hit = tokens & write_keywords
+    if hit:
+        return False, f"non-read-only statement: {sorted(hit)[0]}"
+    # Guard on the residue after stripping leading whitespace/parens: re.sub can
+    # yield "" from a non-empty input like "((", so checking `stripped` would
+    # crash on [0]. Fail closed on empty residue.
+    residue = re.sub(r"^[\s(]*", "", stripped)
+    first_word = residue.split(None, 1)[0].upper() if residue else ""
+    if first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM") or first_word in _READ_ONLY_COMMAND_PREFIXES:
+        return True, ""
+    return False, f"could not verify statement is read-only (starts with {first_word or 'nothing'})"
+
+
+def _is_limitable_sql(sql: str) -> bool:
+    """
+    True only when it is safe to append a trailing ``LIMIT`` — i.e. the final
+    statement is a row-returning query. SHOW/DESCRIBE/EXPLAIN/USE/SET do not
+    accept a trailing LIMIT and would become invalid SQL.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    set_op = getattr(exp, "SetOperation", exp.Union)
+    query_types = (exp.Select, set_op, exp.Union, exp.Subquery, exp.With)
+    try:
+        statements = [s for s in sqlglot.parse(sql, read="databricks") if s]
+    except Exception:
+        statements = None
+    if statements:
+        return isinstance(statements[-1], query_types)
+    # Parse failed: only append LIMIT for clearly query-shaped SQL. Guard on the
+    # residue after re.sub (which can be empty for input like "((").
+    residue = re.sub(r"^[\s(]*", "", sql.strip())
+    first_word = residue.split(None, 1)[0].upper() if residue else ""
+    return first_word in ("SELECT", "WITH", "TABLE", "VALUES", "FROM")
 
 
 class SQLExecutionAgent:
@@ -209,6 +307,23 @@ class SQLExecutionAgent:
             if sql_match:
                 extracted_sql = sql_match.group(1).strip()
         
+        # Step 1b: Reject non-read-only SQL before it reaches the warehouse.
+        # This is defense-in-depth: the SQL is LLM-generated and could be steered
+        # toward mutating statements via prompt injection.
+        is_read_only, ro_reason = _is_read_only_sql(extracted_sql)
+        if not is_read_only:
+            print(f"⛔ Rejected non-read-only SQL: {ro_reason}")
+            return {
+                "success": False,
+                "sql": extracted_sql,
+                "result": None,
+                "row_count": 0,
+                "columns": [],
+                "error": f"Only read-only SQL is permitted (SELECT/WITH/UNION/SHOW/DESCRIBE/EXPLAIN/USE/SET): {ro_reason}",
+                "error_type": "ReadOnlyPolicyViolation",
+                "error_hint": "Rephrase the request as a read-only query (e.g., SELECT/WITH) rather than a mutating statement.",
+            }
+
         # Step 2: Enforce LIMIT clause (for safety and token management)
         # Only match a trailing LIMIT at the end of the statement, not inside CTEs/subqueries
         trailing_limit = re.search(r'\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+\d+)?\s*;?\s*$', extracted_sql, re.IGNORECASE)
@@ -217,7 +332,9 @@ class SQLExecutionAgent:
             if existing_limit > max_rows:
                 extracted_sql = extracted_sql[:trailing_limit.start()] + f' LIMIT {max_rows}' + extracted_sql[trailing_limit.end():]
                 print(f"⚠️  Reduced trailing LIMIT from {existing_limit} to {max_rows} (max_rows enforcement)")
-        else:
+        elif _is_limitable_sql(extracted_sql):
+            # Only append LIMIT to row-returning queries. Appending it to
+            # SHOW/DESCRIBE/EXPLAIN/USE/SET would produce invalid SQL.
             extracted_sql = f"{extracted_sql.rstrip(';')} LIMIT {max_rows}"
         
         try:

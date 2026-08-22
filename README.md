@@ -1,6 +1,6 @@
-![DBX-UnifiedChat Logo](docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png)
+![Genie Juan Logo](docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png)
 
-# DBX-UnifiedChat - Databricks Unified Chat
+# Genie Juan - Databricks Unified Chat
 
 > A multi-agent system for intelligent cross-domain data queries built with LangGraph, Databricks Genie, Lakebase, and Claude models/skills on Databricks Platform.
 
@@ -18,7 +18,7 @@
 
 ## Overview
 
-Organizations struggle to query data across multiple domains and data sources, requiring deep SQL expertise and knowledge of complex data schemas. **Databricks Unified Chat** solves this by providing an intelligent multi-agent system that routes natural language queries to the appropriate data sources, synthesizes results, and delivers comprehensive answers.
+Organizations struggle to query data across multiple domains and data sources, requiring deep SQL expertise and knowledge of complex data schemas. **Genie Juan** solves this by providing an intelligent multi-agent system that routes natural language queries to the appropriate data sources, synthesizes results, and delivers comprehensive answers.
 
 Built on LangGraph, Databricks Genie and Lakebase, this solution enables business users to ask questions spanning multiple data domains without needing to understand the underlying data architecture or write complex SQL queries.
 
@@ -27,7 +27,7 @@ the Databricks App bundle, backend agent runtime, UI, and deployment scripts.
 Older root-level deployment and Model Serving paths are no longer part of the
 active repository workflow.
 
-> ### Why use DBX-UnifiedChat?
+> ### Why use Genie Juan?
 - **Accuracy of Answer** 
     - Validated with customers and partners, e.g., tumor outcome data analysis.
 - **Explanation and Curation** 
@@ -83,7 +83,7 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 
 ## Presentation
 
-<a href="https://blitzbricksteryy-db.github.io/dbx-unifiedchat/docs/decks/slides_2slide.html" target="_blank">
+<a href="https://alexxx-db.github.io/genie-unifiedchat/docs/decks/slides_2slide.html" target="_blank">
   <img src="docs/logos/deck_logo.png" width="600px" alt="View Presentation Slides" />
   <br />
   <b>🚀 Click here to view the Interactive Presentation Slides</b>
@@ -112,8 +112,8 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 ### Installation
 
 ```bash
-git clone https://github.com/databricks-solutions/dbx-unifiedchat.git
-cd dbx-unifiedchat
+git clone https://github.com/alexxx-db/genie-unifiedchat.git
+cd genie-unifiedchat
 ```
 
 ### Recommended Workflow
@@ -136,7 +136,7 @@ Local development still uses `agent_app/.env` as a materialized runtime file
 for machine-specific values, auth context, resolved database connection
 details, and any local-only overrides.
 
-From a local terminal or CI runner:
+From a local terminal:
 
 ```bash
 cd agent_app
@@ -153,13 +153,20 @@ Useful variations:
 The deploy script validates the bundle, deploys the app resources, runs the prep or
 full deployment job graph, and can optionally start the app.
 
+For CI, run `./scripts/deploy.sh ... --ci`; this skips local bootstrap and
+passes `--auto-approve` to `databricks bundle deploy`. The CI runner must
+install required tools such as `python3`, Databricks CLI, and any Python
+dependencies before executing the deploy step. Add `--skip-bootstrap` only when
+using a non-CI context with a pre-prepared environment.
+
 #### 2. Workspace-native operator flow
 
 If you prefer to operate entirely inside Databricks, open
-`agent_app/scripts/deploy_notebook.py` and use it as a guided handoff to the
-Databricks web terminal. That notebook resolves the active target, prints the
-exact `./scripts/deploy.sh ...` command to run, and provides post-deploy
-verification.
+`agent_app/scripts/deploy_notebook.py`. In `deployment_context=web_terminal` or
+`deployment_context=local`, the notebook prints the exact
+`./scripts/deploy.sh ...` command to run. In `deployment_context=ci`, it runs
+the canonical `deploy.sh --ci` flow directly inside the notebook. The notebook
+also resolves the active target and provides post-deploy verification.
 
 #### 3. Local app development in `agent_app`
 
@@ -232,7 +239,7 @@ supported workflow.
 * [**Testing Guide**](agent_app/tests/README.md) - Run tests and write new tests
 * [**Contributing**](CONTRIBUTING.md) - Contribution guidelines
 * `agent_app/scripts/deploy.sh` - Canonical local and CI deployment entry point
-* `agent_app/scripts/deploy_notebook.py` - Workspace-native operator handoff
+* `agent_app/scripts/deploy_notebook.py` - Workspace-native deploy notebook
 * `agent_app/scripts/dev-local.sh` - Current local bootstrap/build entry point
 * `agent_app/scripts/dev-local-hot-reload.sh` - Current hot-reload development entry point
 

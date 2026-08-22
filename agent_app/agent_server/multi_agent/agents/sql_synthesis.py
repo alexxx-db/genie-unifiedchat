@@ -23,10 +23,10 @@ Both functions:
 """
 
 import json
+import logging
 import time
 from functools import wraps
 from typing import Dict, List, Optional, Any, Callable
-from uuid import uuid4
 
 from langchain_core.messages import AIMessage
 from langgraph.config import get_stream_writer
@@ -56,25 +56,16 @@ _performance_metrics = {
     "cache_stats": {}
 }
 
-_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+logger = logging.getLogger(__name__)
 
 
 def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
-    try:
-        payload = {
-            "sessionId": "5f14c7",
-            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "runId": "run1",
-            "hypothesisId": "route-debug",
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
+    """Emit routing/synthesis debug info via the standard logger.
+
+    Previously this wrote to a hard-coded developer path on every call, which
+    leaked routing data locally and silently failed everywhere else.
+    """
+    logger.debug("%s | %s | %s", location, message, data or {})
 
 # Agent cache (module-level)
 _agent_cache = {}
@@ -93,7 +84,8 @@ def extract_synthesis_table_context(state: AgentState) -> dict:
     """Extract minimal context for table-based SQL synthesis."""
     return {
         "plan": state.get("plan", {}),
-        "relevant_space_ids": state.get("relevant_space_ids", [])
+        "relevant_space_ids": state.get("relevant_space_ids", []),
+        "executed_result_literals": state.get("executed_result_literals"),
     }
 
 
@@ -102,7 +94,12 @@ def extract_synthesis_genie_context(state: AgentState) -> dict:
     return {
         "plan": state.get("plan", {}),
         "relevant_spaces": state.get("relevant_spaces", []),
-        "genie_route_plan": state.get("genie_route_plan")
+        "genie_route_plan": state.get("genie_route_plan"),
+        "genie_execution_mode": state.get("genie_execution_mode"),
+        "dependency_edges": state.get("dependency_edges"),
+        "genie_conversation_ids": state.get("genie_conversation_ids"),
+        "executed_result_literals": state.get("executed_result_literals"),
+        "join_contract": state.get("join_contract"),
     }
 
 
@@ -284,6 +281,9 @@ def _build_loop_prompt_prefix(state: AgentState) -> Optional[str]:
             f"- If the next sub-question is already answered by prior results, skip it.\n"
             f"- If you can write a better query using data from prior results "
             f"(e.g., exact codes, IDs), do so.\n"
+            f"- When EXECUTED RESULT LITERALS are present, embed those concrete "
+            f"values in the next Genie question / SQL filter; do not rediscover "
+            f"the prior result set.\n"
             f"- If ALL remaining questions are already addressed, return the "
             f"special marker: NO_MORE_QUERIES\n"
             f"- Otherwise, generate ONLY ONE query for the most relevant "
@@ -557,9 +557,38 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     track_agent_model_usage("sql_synthesis_genie", llm_endpoint)
     
     # Use minimal context (already extracted)
-    plan = context.get("plan", {})
+    plan = dict(context.get("plan") or {})
     genie_route_plan = context.get("genie_route_plan") or plan.get("genie_route_plan", {})
-    
+    genie_execution_mode = context.get("genie_execution_mode") or plan.get("genie_execution_mode")
+    dependency_edges = context.get("dependency_edges") or plan.get("dependency_edges")
+    genie_conversation_ids = (
+        context.get("genie_conversation_ids")
+        or plan.get("genie_conversation_ids")
+        or state.get("genie_conversation_ids")
+    )
+    executed_result_literals = (
+        context.get("executed_result_literals")
+        or plan.get("executed_result_literals")
+        or state.get("executed_result_literals")
+    )
+    join_contract = (
+        context.get("join_contract")
+        or plan.get("join_contract")
+        or state.get("join_contract")
+    )
+    if genie_route_plan:
+        plan["genie_route_plan"] = genie_route_plan
+    if genie_execution_mode:
+        plan["genie_execution_mode"] = genie_execution_mode
+    if dependency_edges is not None:
+        plan["dependency_edges"] = dependency_edges
+    if genie_conversation_ids:
+        plan["genie_conversation_ids"] = genie_conversation_ids
+    if executed_result_literals:
+        plan["executed_result_literals"] = executed_result_literals
+    if join_contract:
+        plan["join_contract"] = join_contract
+
     if not genie_route_plan:
         print("❌ No genie_route_plan found in plan")
         return {
@@ -567,14 +596,20 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             "synthesis_error": "No routing plan available for genie route",
             "next_agent": "summarize",
         }
-    
+
+    from ..utils.genie_route_dag import (
+        compute_execution_waves,
+        legacy_question_map,
+        normalize_genie_route_plan,
+        resolve_genie_execution_mode,
+    )
+
     try:
         # Inject retry / sequential context into the plan if looping
         loop_prefix = _build_loop_prompt_prefix(state)
         if loop_prefix:
             loop_reason = state.get("loop_reason")
             print(f"Loop reason: {loop_reason} — injecting context into plan")
-            plan = dict(plan)
             original_query = plan.get("original_query", "")
 
             room_info = "\n".join(
@@ -588,7 +623,72 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 # genie_route_plan may not match sub_questions (different phrasing),
                 # so index-based trimming is unreliable -- just disable it.
                 plan["genie_route_plan"] = None
+                plan["genie_execution_mode"] = None
                 print("  Nulled genie_route_plan for sequential step — LLM will use individual tools")
+
+                from ..utils.executed_result_literals import (
+                    build_executed_literal_package,
+                    enrich_question_with_executed_literals,
+                    format_executed_literals_block,
+                )
+                from ..utils.join_contract import (
+                    build_join_contract_from_execution,
+                    enrich_question_with_join_contract,
+                    format_join_contract_block,
+                    merge_join_contracts,
+                )
+
+                literal_package = (
+                    plan.get("executed_result_literals")
+                    or state.get("executed_result_literals")
+                    or build_executed_literal_package(state.get("preserved_results"))
+                )
+                literal_block = format_executed_literals_block(literal_package)
+                if literal_package and literal_package.get("has_literals"):
+                    plan["executed_result_literals"] = literal_package
+
+                join_contract = merge_join_contracts(
+                    plan.get("join_contract") or state.get("join_contract"),
+                    build_join_contract_from_execution(
+                        state.get("preserved_results"),
+                        literal_package=literal_package,
+                    ),
+                )
+                plan["join_contract"] = join_contract
+                contract_block = format_join_contract_block(join_contract)
+
+                step = state.get("sequential_step", 0)
+                sub_questions = state.get("sub_questions") or []
+                next_sub_q = (
+                    sub_questions[step]
+                    if isinstance(step, int) and 0 <= step < len(sub_questions)
+                    else ""
+                )
+                suggested_base = next_sub_q or (
+                    "Continue the analysis using the prior result literals."
+                )
+                suggested_genie_question = enrich_question_with_join_contract(
+                    enrich_question_with_executed_literals(
+                        suggested_base,
+                        literal_package,
+                    ),
+                    join_contract,
+                )
+                if suggested_genie_question:
+                    plan["suggested_genie_question"] = suggested_genie_question
+
+                literal_guidance = ""
+                if contract_block or literal_block:
+                    literal_guidance = (
+                        f"\n- Prior steps produced a JOIN CONTRACT and/or concrete literals. "
+                        f"You MUST paste them into the Genie question "
+                        f"(use suggested_genie_question or the blocks below).\n"
+                        f"- Do NOT ask Genie to rediscover top-N / prior keys / time windows.\n"
+                    )
+                    if contract_block:
+                        literal_guidance += f"\n{contract_block}\n"
+                    if literal_block and "EXECUTED RESULT LITERALS" not in (contract_block or ""):
+                        literal_guidance += f"\n{literal_block}\n"
 
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Sequential Mode):\n"
@@ -598,12 +698,22 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     f"- Choose the room most relevant to the adapted question content.\n"
                     f"  The adapted question may need a DIFFERENT room than originally assigned.\n"
                     f"- You MUST produce only ONE SQL query for this step."
+                    f"{literal_guidance}"
                 )
             elif loop_reason == "retry":
+                prior_cids = plan.get("genie_conversation_ids") or {}
+                cid_lines = "\n".join(
+                    f"  - {sid}: {cid}" for sid, cid in prior_cids.items()
+                ) or "  - (none cached yet)"
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Retry Mode):\n"
                     f"Available Genie rooms:\n{room_info}\n"
                     f"- Retry only the FAILED query.\n"
+                    f"- Prefer SAME-SPACE Genie conversation continuity:\n"
+                    f"  Cached conversation_ids:\n{cid_lines}\n"
+                    f"- Pass conversation_ids on invoke_parallel_genie_agents, or "
+                    f"conversation_id on the individual Genie tool for that space.\n"
+                    f"- Only start a fresh conversation when switching to a different room.\n"
                     f"- Try rephrasing the question for the same room, or pick a different room.\n"
                     f"- Use individual Genie agent tools for precise control."
                 )
@@ -612,19 +722,53 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
 
             plan["original_query"] = f"{loop_prefix}{genie_guidance}\n\nOriginal question: {original_query}"
             writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": f"Retry/sequential context injected (loop_reason={loop_reason})"})
-        
+
         active_grp = plan.get("genie_route_plan") or {}
         if active_grp:
-            print(f"Querying {len(active_grp)} Genie agents...")
-            for idx, (space_id, query) in enumerate(active_grp.items(), 1):
-                space_title = next((s.get("space_title", space_id) for s in relevant_spaces if s.get("space_id") == space_id), space_id)
+            normalized_grp = normalize_genie_route_plan(active_grp)
+            mode = resolve_genie_execution_mode(
+                plan.get("genie_execution_mode"),
+                normalized_grp,
+            )
+            plan["genie_execution_mode"] = mode
+            plan["genie_route_plan"] = normalized_grp or active_grp
+            waves = compute_execution_waves(normalized_grp) if normalized_grp else []
+            question_map = legacy_question_map(normalized_grp) if normalized_grp else {}
+            print(
+                f"Querying {len(question_map)} Genie agents "
+                f"(mode={mode}, waves={len(waves)})..."
+            )
+            writer({
+                "type": "agent_thinking",
+                "agent": "sql_synthesis_genie",
+                "content": (
+                    f"Genie execution mode={mode}; "
+                    f"{len(question_map)} space(s); {len(waves)} wave(s)"
+                ),
+            })
+            for idx, (space_id, query) in enumerate(question_map.items(), 1):
+                space_title = next(
+                    (
+                        s.get("space_title", space_id)
+                        for s in relevant_spaces
+                        if s.get("space_id") == space_id
+                    ),
+                    space_id,
+                )
+                deps = (normalized_grp.get(space_id) or {}).get("depends_on") or []
+                dep_note = f" (depends_on={deps})" if deps else ""
                 writer({
                     "type": "genie_agent_call",
                     "agent": "sql_synthesis_genie",
                     "space_id": space_id,
                     "space_title": space_title,
                     "query": query,
-                    "content": f"[{idx}/{len(active_grp)}] Calling Genie agent '{space_title}'"
+                    "depends_on": deps,
+                    "genie_execution_mode": mode,
+                    "content": (
+                        f"[{idx}/{len(question_map)}] Genie '{space_title}'"
+                        f"{dep_note}"
+                    ),
                 })
         else:
             print("Sequential step — LLM will pick a Genie room via individual tools")
@@ -647,7 +791,22 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         sql_query = result.get("sql")
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
-        
+        from ..utils.genie_route_dag import merge_conversation_ids
+
+        updated_conversation_ids = merge_conversation_ids(
+            state.get("genie_conversation_ids"),
+            plan.get("genie_conversation_ids"),
+            result.get("genie_conversation_ids"),
+        ) or None
+
+        from ..utils.join_contract import merge_join_contracts
+
+        updated_join_contract = merge_join_contracts(
+            state.get("join_contract"),
+            plan.get("join_contract"),
+            result.get("join_contract"),
+        )
+
         sql_queries, query_labels = extract_sql_queries_from_agent_result(
             result, "sql_synthesis_genie"
         )
@@ -665,6 +824,8 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 "sql_query_labels": query_labels,
                 "sql_query": sql_queries[0],
                 "has_sql": True,
+                "genie_conversation_ids": updated_conversation_ids,
+                "join_contract": updated_join_contract,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,
@@ -687,6 +848,8 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             return {
                 **_preserved_as_execution_results(state),
                 "synthesis_error": "Cannot generate SQL query from Genie agent fragments",
+                "genie_conversation_ids": updated_conversation_ids,
+                "join_contract": updated_join_contract,
                 "sql_synthesis_explanation": explanation,
                 "sql_synthesis_explanations": _append_synthesis_explanation(
                     state,

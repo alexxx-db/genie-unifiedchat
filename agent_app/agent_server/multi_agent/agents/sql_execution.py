@@ -70,6 +70,11 @@ def _build_sequential_feedback(
     total: int,
 ) -> str:
     """Build structured feedback for sequential continuation."""
+    from ..utils.executed_result_literals import (
+        build_executed_literal_package,
+        format_executed_literals_block,
+    )
+
     parts = [f"## Sequential Step {step + 1} of {total}\n"]
     if preserved:
         parts.append("### Previous results:")
@@ -101,6 +106,34 @@ def _build_sequential_feedback(
                 f"SQL: {sql}\n"
                 f"Columns: {', '.join(cols)}\n"
                 f"Data: {sample_json}\n"
+            )
+
+        from ..utils.join_contract import (
+            build_join_contract_from_execution,
+            format_join_contract_block,
+        )
+
+        literal_package = build_executed_literal_package(preserved)
+        literal_block = format_executed_literals_block(literal_package)
+        contract_block = format_join_contract_block(
+            build_join_contract_from_execution(
+                preserved,
+                literal_package=literal_package,
+            )
+        )
+        if contract_block or literal_block:
+            parts.append("### Shared join contract / literals for the next Genie / SQL question:")
+            if contract_block:
+                parts.append(contract_block)
+            if literal_block and "EXECUTED RESULT LITERALS" not in (contract_block or ""):
+                parts.append(literal_block)
+            parts.append(
+                "\n### Instructions for next step:\n"
+                "- Ground the next Genie question in the JOIN CONTRACT "
+                "(keys, time window, metrics, sql_by_space) and concrete literals.\n"
+                "- Embed exact codes/IDs in filters (e.g. IN lists).\n"
+                "- Do NOT ask Genie to rediscover the set already returned above "
+                "(for example, do not re-ask for 'top N' if those IDs are already listed)."
             )
     return "\n".join(parts)
 
@@ -454,15 +487,32 @@ def _execute_sequential(
                 "execution_results": preserved,
                 "execution_result": preserved[0] if preserved else None,
                 "preserved_results": [],
+                "executed_result_literals": None,
                 "sql_retry_feedback": None,
                 "loop_reason": None,
                 "next_agent": "summarize",
                 "messages": [SystemMessage(content=f"Sequential complete: {len(preserved)} result sets")],
             }
+        from ..utils.executed_result_literals import build_executed_literal_package
+        from ..utils.join_contract import (
+            build_join_contract_from_execution,
+            merge_join_contracts,
+        )
+
+        literal_package = build_executed_literal_package(preserved)
+        join_contract = merge_join_contracts(
+            state.get("join_contract"),
+            build_join_contract_from_execution(
+                preserved,
+                literal_package=literal_package,
+            ),
+        )
         return {
             "preserved_results": preserved,
             "sequential_step": next_step,
             "sql_retry_count": 0,
+            "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
+            "join_contract": join_contract,
             "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
             "loop_reason": "sequential_next",
             "next_agent": route or "summarize",
@@ -488,15 +538,32 @@ def _execute_sequential(
             "execution_results": preserved,
             "execution_result": preserved[0] if preserved else None,
             "preserved_results": [],
+            "executed_result_literals": None,
             "sql_retry_feedback": None,
             "loop_reason": None,
             "next_agent": "summarize",
             "messages": [SystemMessage(content=f"Sequential complete (with skipped failures): {len(preserved)} result sets")],
         }
+    from ..utils.executed_result_literals import build_executed_literal_package
+    from ..utils.join_contract import (
+        build_join_contract_from_execution,
+        merge_join_contracts,
+    )
+
+    literal_package = build_executed_literal_package(preserved)
+    join_contract = merge_join_contracts(
+        state.get("join_contract"),
+        build_join_contract_from_execution(
+            preserved,
+            literal_package=literal_package,
+        ),
+    )
     return {
         "preserved_results": preserved,
         "sequential_step": next_step,
         "sql_retry_count": 0,
+        "executed_result_literals": literal_package if literal_package.get("has_literals") else None,
+        "join_contract": join_contract,
         "sql_retry_feedback": _build_sequential_feedback(preserved, step=next_step, total=total),
         "loop_reason": "sequential_next",
         "next_agent": route or "summarize",
