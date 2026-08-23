@@ -618,13 +618,13 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             )
 
             if loop_reason == "sequential_next":
-                # Null out the stale full-plan so the LLM doesn't re-invoke
-                # parallel with all original questions. The sub-question texts in
-                # genie_route_plan may not match sub_questions (different phrasing),
-                # so index-based trimming is unreliable -- just disable it.
-                plan["genie_route_plan"] = None
-                plan["genie_execution_mode"] = None
-                print("  Nulled genie_route_plan for sequential step — LLM will use individual tools")
+                # Keep genie_route_plan / genie_execution_mode so dependent
+                # spaces still receive few-shot inject and join_contract.
+                # Do not flatten or drop the DAG on sequential warehouse loops.
+                print(
+                    "  Preserving genie_route_plan for sequential step "
+                    "(few-shot / join_contract remain available)"
+                )
 
                 from ..utils.executed_result_literals import (
                     build_executed_literal_package,
@@ -690,13 +690,33 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                     if literal_block and "EXECUTED RESULT LITERALS" not in (contract_block or ""):
                         literal_guidance += f"\n{literal_block}\n"
 
+                has_dag = bool(
+                    (plan.get("genie_execution_mode") or "").strip().lower() == "dag"
+                    or any(
+                        isinstance(step, dict) and step.get("depends_on")
+                        for step in (plan.get("genie_route_plan") or {}).values()
+                    )
+                )
+                if has_dag:
+                    tool_guidance = (
+                        f"- genie_route_plan is still valid. If you need another Genie call, "
+                        f"you MUST use invoke_parallel_genie_agents with "
+                        f"genie_execution_mode='dag' so few-shot inject runs.\n"
+                        f"- Do NOT call individual Genie tools for dependent spaces.\n"
+                        f"- Prefer writing SQL from the JOIN CONTRACT / executed literals "
+                        f"when they already answer the next sub-question.\n"
+                    )
+                else:
+                    tool_guidance = (
+                        f"- Prefer JOIN CONTRACT / executed literals when they already "
+                        f"answer the next sub-question.\n"
+                        f"- If you need another Genie call, use invoke_parallel_genie_agents "
+                        f"or the individual tool for that single space.\n"
+                    )
                 genie_guidance = (
                     f"\n\nGENIE ROUTE GUIDANCE (Sequential Mode):\n"
                     f"Available Genie rooms:\n{room_info}\n"
-                    f"- Do NOT call invoke_parallel_genie_agents. The original plan is stale.\n"
-                    f"- Use an INDIVIDUAL Genie agent tool for this single adapted query.\n"
-                    f"- Choose the room most relevant to the adapted question content.\n"
-                    f"  The adapted question may need a DIFFERENT room than originally assigned.\n"
+                    f"{tool_guidance}"
                     f"- You MUST produce only ONE SQL query for this step."
                     f"{literal_guidance}"
                 )
