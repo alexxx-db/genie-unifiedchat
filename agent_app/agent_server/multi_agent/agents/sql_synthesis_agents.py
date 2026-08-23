@@ -694,7 +694,7 @@ class SQLSynthesisGenieAgent:
                     "Example DAG: {'space_a': {'question': 'Top 10 drugs', 'depends_on': []}, "
                     "'space_b': {'question': 'Diagnoses for those drugs', "
                     "'depends_on': ['space_a'], "
-                    "'inject': ['ids', 'filters', 'sql_preview', 'answer_summary']}}."
+                    "'inject': ['few_shot', 'ids', 'filters']}}."
                 ),
             )
             genie_execution_mode: Optional[str] = Field(
@@ -900,9 +900,12 @@ class SQLSynthesisGenieAgent:
                 "Invoke Genie agents for SQL generation. Supports: "
                 "(1) PARALLEL independent questions — space_id→question string map; "
                 "(2) DAG dependent questions — structured steps with depends_on + inject "
-                "so upstream Genie answers/SQL/IDs are chained into downstream prompts. "
+                "(few_shot, ids, filters, sql_preview, answer_summary) so upstream "
+                "Genie Q/SQL/keys are chained as few-shot examples into downstream prompts. "
                 "Pass genie_execution_mode='dag' when steps have dependencies "
                 "(or omit and let depends_on infer DAG). "
+                "When any step has depends_on, you MUST use this tool — individual "
+                "Genie tools skip wave inject. "
                 "Returns per-space SQL/reasoning/answer/conversation_id plus "
                 "_genie_conversation_ids and _join_contract (entities/keys/time/metrics/"
                 "sql_by_space). On SAME-SPACE retry, pass conversation_ids "
@@ -955,33 +958,36 @@ The Plan given to you is a JSON:
   // legacy parallel form:
   // 'space_id_1': 'partial_question_1',
   // OR structured DAG form:
-  // 'space_id_1': {'question': '...', 'depends_on': [], 'inject': ['ids','filters','sql_preview','answer_summary']},
-  // 'space_id_2': {'question': '...', 'depends_on': ['space_id_1'], 'inject': ['ids','filters','sql_preview','answer_summary']}
+  // 'space_id_1': {'question': '...', 'depends_on': [], 'inject': ['few_shot','ids','filters']},
+  // 'space_id_2': {'question': '...', 'depends_on': ['space_id_1'], 'inject': ['few_shot','ids','filters']}
 } or null
 }
 
 ## TOOL EXECUTION STRATEGY:
 
 ### OPTION 1: PARALLEL (independent spaces)
-When genie_execution_mode is "parallel" (or plan questions have no depends_on):
+When genie_execution_mode is "parallel" AND no step has depends_on:
 1. Extract genie_route_plan
 2. Call invoke_parallel_genie_agents(genie_route_plan=..., genie_execution_mode="parallel")
 3. Combine successful SQL fragments
 
-### OPTION 2: DAG WITH STRUCTURED INJECT (dependent spaces) — PREFERRED for staged questions
+### OPTION 2: DAG WITH FEW-SHOT INJECT (dependent spaces) — REQUIRED when depends_on is non-empty
 When genie_execution_mode is "dag" OR any step has depends_on (e.g. "top N items, then details for those items"):
-1. Pass the structured genie_route_plan as-is (keep depends_on + inject)
+1. Pass the structured genie_route_plan as-is (keep depends_on + inject, including few_shot)
 2. Call invoke_parallel_genie_agents(genie_route_plan=..., genie_execution_mode="dag")
-3. The tool runs topological waves and injects compact upstream context
-   (IDs, filters, SQL preview, answer summary) into downstream Genie questions
-4. Do NOT manually re-ask upstream spaces unless a wave failed
+3. The tool runs topological waves and injects labeled few-shot examples
+   (upstream Q / SQL / keys / filters) into downstream Genie questions
+4. Do NOT call individual Genie tools for dependent spaces — they skip wave inject
+5. Do NOT manually re-ask upstream spaces unless a wave failed
+6. Do NOT pass a conversation_id from one space to a different space
 
 ### OPTION 3: INDIVIDUAL TOOLS (rare)
-Use only for granular retry / adaptive refinement after DAG/parallel failure.
+Use only for granular SAME-SPACE retry after DAG/parallel failure.
+Never use individual tools for a step that has depends_on.
 
 **NOTE**: Prefer OPTION 1 for independent multi-space work; OPTION 2 whenever
 one Genie answer must feed another Genie's prompt. Do not flatten DAG plans
-into string-only maps — that drops dependencies.
+into string-only maps — that drops dependencies and few-shot inject.
 
 ## DISASTER RECOVERY (DR) — SAME-SPACE conversation_id CONTINUITY:
 
@@ -1010,7 +1016,7 @@ Step 3: invoke_parallel_genie_agents(..., conversation_ids={"space_a": "abc"})
 ## EXAMPLE DAG EXECUTION:
 
 Step 1: Call invoke_parallel_genie_agents with structured depends_on plan (mode=dag)
-Step 2: Wave 1 runs independent spaces; wave 2+ receive injected IDs/filters/SQL
+Step 2: Wave 1 runs independent spaces; wave 2+ receive few-shot Q/SQL/keys
 Step 3: Combine all successful SQL fragments (keep self-contained queries)
 
 ## SQL SYNTHESIS:
@@ -1097,8 +1103,8 @@ OUTPUT REQUIREMENTS:
         Synthesize SQL using Genie agents with intelligent tool selection.
         
         The agent has access to:
-        1. invoke_parallel_genie_agents tool - For fast parallel execution
-        2. Individual Genie agent tools - For sequential/dependent queries
+        1. invoke_parallel_genie_agents tool - Parallel or DAG few-shot inject
+        2. Individual Genie agent tools - Same-space retry only
         
         The agent autonomously decides which strategy to use and handles
         disaster recovery with retry logic for both parallel and sequential execution
@@ -1151,9 +1157,11 @@ OUTPUT REQUIREMENTS:
         dag_hint = ""
         if mode == "dag":
             dag_hint = (
-                "This plan is a DEPENDENCY DAG. Call invoke_parallel_genie_agents with "
-                "genie_execution_mode='dag' and keep structured depends_on/inject fields. "
-                "Do not flatten steps to bare question strings.\n"
+                "This plan is a DEPENDENCY DAG. You MUST call invoke_parallel_genie_agents "
+                "with genie_execution_mode='dag' and keep structured depends_on/inject "
+                "(including few_shot). Do not flatten steps to bare question strings. "
+                "Do not call individual Genie tools for dependents — that skips few-shot inject. "
+                "Do not reuse conversation_id across different spaces.\n"
             )
         else:
             dag_hint = (

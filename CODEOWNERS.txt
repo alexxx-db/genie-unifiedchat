@@ -1,4 +1,4 @@
-# CODEOWNERS for genie-unifiedchat
+# CODEOWNERS for genie-juan
 # 
 # This file defines individuals or teams responsible for code in this repository.
 # More information: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners

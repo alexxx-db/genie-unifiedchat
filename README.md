@@ -83,11 +83,15 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 
 ## Presentation
 
-<a href="https://alexxx-db.github.io/genie-unifiedchat/docs/decks/slides_2slide.html" target="_blank">
+<a href="https://alexxx-db.github.io/genie-juan/decks/slides_2slide.html" target="_blank">
   <img src="docs/logos/deck_logo.png" width="600px" alt="View Presentation Slides" />
   <br />
   <b>🚀 Click here to view the Interactive Presentation Slides</b>
 </a>
+
+The public project site is [https://alexxx-db.github.io/genie-juan/](https://alexxx-db.github.io/genie-juan/).
+Pushes to `main` that change `docs/` publish it through `.github/workflows/pages.yml`.
+Set the GitHub repo Pages source to **GitHub Actions** once, on `alexxx-db/genie-juan`.
 
 
 
@@ -112,8 +116,8 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 ### Installation
 
 ```bash
-git clone https://github.com/alexxx-db/genie-unifiedchat.git
-cd genie-unifiedchat
+git clone https://github.com/alexxx-db/genie-juan.git
+cd genie-juan
 ```
 
 ### Recommended Workflow

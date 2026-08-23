@@ -231,7 +231,7 @@ class PlanningAgent:
                 "space_id_1": {
                     "question": "Top 10 drugs by total cost. Please limit to top 10 rows",
                     "depends_on": [],
-                    "inject": ["ids", "filters", "sql_preview", "answer_summary"],
+                    "inject": ["few_shot", "ids", "filters"],
                 },
                 "space_id_2": {
                     "question": (
@@ -239,7 +239,7 @@ class PlanningAgent:
                         "Please limit to top 10 rows"
                     ),
                     "depends_on": ["space_id_1"],
-                    "inject": ["ids", "filters", "sql_preview", "answer_summary"],
+                    "inject": ["few_shot", "ids", "filters"],
                 },
             },
             indent=2,
@@ -281,7 +281,11 @@ Break down the question and determine:
       Use structured steps:
 {dag_example}
       - depends_on: list of upstream space_ids (empty for roots)
-      - inject: subset of ["ids","filters","sql_preview","answer_summary"] to chain forward
+      - inject: subset of ["few_shot","ids","filters","sql_preview","answer_summary"]
+        - few_shot: labeled Q/SQL/keys example from the upstream space (default for dependents)
+        - ids + few_shot: "find X then look up Y" (top-N codes → details in another space)
+        - filters + sql_preview: preserve a time window / grain / predicate
+        - answer_summary: only when a short narrative helps; omit if it is noise
       - ALSO set dependency_edges, e.g. [{{"from": "space_id_1", "to": "space_id_2"}}]
         (must match depends_on; do not invent spaces not in relevant_space_ids)
     - For table_route: genie_route_plan=null, genie_execution_mode=null, dependency_edges=[]
@@ -289,6 +293,7 @@ Break down the question and determine:
     - Add "Please limit to top 10 rows" to each question
     - Prefer dag over parallel when one space's results constrain another space's question
     - Never mark staged top-N / "and their" / "for those" questions as parallel
+    - Do NOT reuse a Genie conversation_id across different spaces
 {forced_route_instructions}
 
 Return your analysis as JSON:

@@ -6,12 +6,12 @@ Supports legacy ``{space_id: question_str}`` plans and structured steps::
       "space_a": {
         "question": "...",
         "depends_on": [],
-        "inject": ["filters", "ids", "sql_preview", "answer_summary"]
+        "inject": ["few_shot", "filters", "ids", "sql_preview", "answer_summary"]
       },
       "space_b": {
         "question": "...",
         "depends_on": ["space_a"],
-        "inject": ["filters", "ids", "sql_preview", "answer_summary"]
+        "inject": ["few_shot", "filters", "ids", "sql_preview", "answer_summary"]
       }
     }
 
@@ -24,12 +24,22 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-VALID_INJECT_FIELDS = ("filters", "ids", "sql_preview", "answer_summary")
+VALID_INJECT_FIELDS = ("few_shot", "filters", "ids", "sql_preview", "answer_summary")
 DEFAULT_INJECT_FIELDS = list(VALID_INJECT_FIELDS)
 MAX_ANSWER_SUMMARY_CHARS = 600
 MAX_SQL_PREVIEW_CHARS = 800
+MAX_RESULT_PREVIEW_CHARS = 400
 MAX_IDS = 25
 MAX_FILTERS = 15
+MAX_FEW_SHOT_UPSTREAM = 2
+
+# Markers used when stripping inject boilerplate from a stored question so
+# wave N+1 does not nest wave N's inject block as the "upstream question".
+_INJECT_PREAMBLE_MARKERS = (
+    "\n\nCONTEXT FROM UPSTREAM GENIE SPACES",
+    "\n\nFEW-SHOT FROM UPSTREAM SPACE",
+    "\n\nNow answer THIS question in YOUR tables",
+)
 
 
 def normalize_genie_route_step(space_id: str, raw: Any) -> Dict[str, Any]:
@@ -161,6 +171,39 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def strip_inject_preamble(question: str) -> str:
+    """Return the base Genie question without any prior inject / few-shot block."""
+    text = (question or "").strip()
+    if not text:
+        return ""
+    cut = len(text)
+    for marker in _INJECT_PREAMBLE_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].strip()
+
+
+def _format_result_preview(result: Dict[str, Any]) -> str:
+    """Optional compact row preview from structured Genie / warehouse payloads."""
+    columns = result.get("columns") or result.get("result_columns")
+    rows = result.get("rows") or result.get("result_preview") or result.get("sample_rows")
+    if not columns and not rows:
+        return ""
+    parts: List[str] = []
+    if columns:
+        col_names = [str(c) for c in columns if c is not None][:12]
+        if col_names:
+            parts.append("columns: " + ", ".join(col_names))
+    if rows and isinstance(rows, (list, tuple)):
+        shown: List[str] = []
+        for row in list(rows)[:3]:
+            shown.append(_truncate(str(row), 120))
+        if shown:
+            parts.append("rows: " + " | ".join(shown))
+    return _truncate(" ; ".join(parts), MAX_RESULT_PREVIEW_CHARS)
+
+
 def _extract_ids(text: str) -> List[str]:
     """Pull quoted strings and code-like tokens useful as join keys / filters."""
     if not text:
@@ -218,6 +261,9 @@ def build_context_package(space_id: str, result: Dict[str, Any]) -> Dict[str, An
     answer = str(result.get("answer") or "")
     sql = str(result.get("sql") or "")
     success = bool(result.get("success") or sql or answer)
+    raw_question = str(
+        result.get("upstream_question") or result.get("question") or ""
+    )
     return {
         "space_id": space_id,
         "success": success,
@@ -225,7 +271,8 @@ def build_context_package(space_id: str, result: Dict[str, Any]) -> Dict[str, An
         "sql_preview": _truncate(sql, MAX_SQL_PREVIEW_CHARS),
         "ids": _extract_ids(f"{answer}\n{sql}"),
         "filters": _extract_filters(sql),
-        "question": str(result.get("question") or ""),
+        "question": strip_inject_preamble(raw_question),
+        "result_preview": _format_result_preview(result),
         "error": str(result.get("error") or ""),
     }
 
@@ -239,6 +286,42 @@ def build_context_packages(
     }
 
 
+def _format_few_shot_section(
+    dep: str,
+    pkg: Optional[Dict[str, Any]],
+) -> str:
+    """Render one labeled Q/SQL/keys shot for an upstream space."""
+    if not pkg:
+        return (
+            f"FEW-SHOT FROM UPSTREAM SPACE {dep}\n"
+            "Q: (no upstream result available)\n"
+            "Do not invent keys or SQL from this space."
+        )
+    if not pkg.get("success"):
+        err = pkg.get("error") or "upstream call failed or returned empty"
+        return (
+            f"FEW-SHOT FROM UPSTREAM SPACE {dep}\n"
+            f"Q: {pkg.get('question') or '(unavailable)'}\n"
+            f"Upstream status: FAILED ({err})\n"
+            "Do not invent keys or SQL from this failed space."
+        )
+
+    lines = [f"FEW-SHOT FROM UPSTREAM SPACE {dep}"]
+    question = pkg.get("question") or "(upstream question not recorded)"
+    lines.append(f"Q: {question}")
+    if pkg.get("sql_preview"):
+        lines.append(f"SQL:\n  {pkg['sql_preview']}")
+    if pkg.get("result_preview"):
+        lines.append(f"Result preview: {pkg['result_preview']}")
+    if pkg.get("ids"):
+        lines.append(f"Result keys: {', '.join(pkg['ids'])}")
+    if pkg.get("filters"):
+        lines.append(f"Suggested filter: {'; '.join(pkg['filters'])}")
+    if len(lines) == 2:
+        lines.append("(upstream succeeded but no SQL or keys to demonstrate)")
+    return "\n".join(lines)
+
+
 def format_inject_block(
     step: Dict[str, Any],
     packages: Dict[str, Dict[str, Any]],
@@ -249,37 +332,73 @@ def format_inject_block(
     if not depends_on:
         return ""
 
-    sections: List[str] = []
+    include_few_shot = "few_shot" in inject_fields
+    context_fields = [
+        field
+        for field in ("answer_summary", "sql_preview", "ids", "filters")
+        if field in inject_fields
+    ]
+    # few_shot already carries SQL / keys / filters; skip duplicating them.
+    if include_few_shot:
+        context_fields = [f for f in context_fields if f == "answer_summary"]
+
+    shot_sections: List[str] = []
+    context_sections: List[str] = []
+    for dep in list(depends_on)[:MAX_FEW_SHOT_UPSTREAM] if include_few_shot else depends_on:
+        pkg = packages.get(dep)
+        if include_few_shot:
+            shot_sections.append(_format_few_shot_section(dep, pkg))
+
     for dep in depends_on:
         pkg = packages.get(dep)
+        if not context_fields:
+            continue
         if not pkg:
-            sections.append(f"### From {dep}\n- (no upstream result available)")
+            context_sections.append(f"### From {dep}\n- (no upstream result available)")
             continue
 
         lines = [f"### From {dep}"]
         if not pkg.get("success"):
             err = pkg.get("error") or "upstream call failed or returned empty"
             lines.append(f"- Upstream status: FAILED ({err})")
-        if "answer_summary" in inject_fields and pkg.get("answer_summary"):
+        if "answer_summary" in context_fields and pkg.get("answer_summary"):
             lines.append(f"- Answer summary: {pkg['answer_summary']}")
-        if "sql_preview" in inject_fields and pkg.get("sql_preview"):
+        if "sql_preview" in context_fields and pkg.get("sql_preview"):
             lines.append(f"- SQL preview:\n```sql\n{pkg['sql_preview']}\n```")
-        if "ids" in inject_fields and pkg.get("ids"):
+        if "ids" in context_fields and pkg.get("ids"):
             lines.append(f"- Key IDs / literals: {', '.join(pkg['ids'])}")
-        if "filters" in inject_fields and pkg.get("filters"):
+        if "filters" in context_fields and pkg.get("filters"):
             lines.append(f"- Suggested filters: {'; '.join(pkg['filters'])}")
         if len(lines) == 1:
             lines.append("- (upstream succeeded but no injectable fields)")
-        sections.append("\n".join(lines))
+        context_sections.append("\n".join(lines))
 
-    if not sections:
+    # Dependents beyond the few-shot cap still get a missing/context note.
+    if include_few_shot and len(depends_on) > MAX_FEW_SHOT_UPSTREAM:
+        extras = list(depends_on)[MAX_FEW_SHOT_UPSTREAM:]
+        for dep in extras:
+            pkg = packages.get(dep)
+            if not pkg:
+                context_sections.append(f"### From {dep}\n- (no upstream result available)")
+
+    parts: List[str] = []
+    if shot_sections:
+        parts.append("\n\n".join(shot_sections))
+    if context_sections:
+        parts.append(
+            "CONTEXT FROM UPSTREAM GENIE SPACES "
+            "(use these concrete values; do not rediscover them):\n"
+            + "\n\n".join(context_sections)
+        )
+    if not parts:
         return ""
 
-    return (
-        "CONTEXT FROM UPSTREAM GENIE SPACES "
-        "(use these concrete values; do not rediscover them):\n"
-        + "\n\n".join(sections)
-    )
+    if include_few_shot:
+        parts.append(
+            "Now answer THIS question in YOUR tables, using those keys / time window.\n"
+            "Do not reuse the upstream SQL verbatim — map entities to this space's schema."
+        )
+    return "\n\n".join(parts)
 
 
 def enrich_question_with_context(

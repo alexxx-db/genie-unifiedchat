@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from agent_server.multi_agent.utils.genie_route_dag import (
     apply_dependency_edges,
     build_context_package,
+    build_context_packages,
     compute_execution_waves,
     dependency_edges_from_plan,
     enrich_question_with_context,
@@ -23,6 +24,7 @@ from agent_server.multi_agent.utils.genie_route_dag import (
     questions_for_wave,
     resolve_genie_execution_mode,
     resolve_space_conversation_id,
+    strip_inject_preamble,
 )
 
 
@@ -36,6 +38,7 @@ def test_normalize_legacy_string_plan():
     assert normalized["space_a"]["question"].startswith("Get top drugs")
     assert normalized["space_a"]["depends_on"] == []
     assert "ids" in normalized["space_a"]["inject"]
+    assert "few_shot" in normalized["space_a"]["inject"]
 
 
 def test_normalize_structured_plan_and_self_dep_removed():
@@ -359,4 +362,142 @@ def test_resolve_space_conversation_id_prefers_explicit():
             cached=cached,
         )
         is None
+    )
+
+
+def test_strip_inject_preamble_drops_nested_blocks():
+    nested = (
+        "Diagnoses for those drugs. Please limit to top 10 rows\n\n"
+        "FEW-SHOT FROM UPSTREAM SPACE space_a\n"
+        "Q: Top drugs\n"
+        "SQL:\n  SELECT code FROM drugs\n\n"
+        "Now answer THIS question in YOUR tables, using those keys / time window.\n"
+        "Do not reuse the upstream SQL verbatim — map entities to this space's schema."
+    )
+    assert strip_inject_preamble(nested) == (
+        "Diagnoses for those drugs. Please limit to top 10 rows"
+    )
+    context_nested = (
+        "Child question\n\n"
+        "CONTEXT FROM UPSTREAM GENIE SPACES (use these concrete values; "
+        "do not rediscover them):\n"
+        "### From a\n- Key IDs / literals: X1"
+    )
+    assert strip_inject_preamble(context_nested) == "Child question"
+
+
+def test_build_context_package_strips_question_and_keeps_result_preview():
+    result = {
+        "success": True,
+        "question": (
+            "Top drugs. Please limit to top 10 rows\n\n"
+            "CONTEXT FROM UPSTREAM GENIE SPACES (use these concrete values; "
+            "do not rediscover them):\n### From prior\n- Key IDs / literals: Z"
+        ),
+        "answer": "Top drug is 'ASPIRIN'",
+        "sql": "SELECT code FROM drugs WHERE code = 'ASPIRIN'",
+        "columns": ["code", "total_cost"],
+        "rows": [{"code": "ASPIRIN", "total_cost": 12}],
+        "conversation_id": "conv-should-not-leak",
+    }
+    pkg = build_context_package("space_a", result)
+    assert pkg["question"] == "Top drugs. Please limit to top 10 rows"
+    assert "code" in pkg["result_preview"]
+    assert "ASPIRIN" in pkg["ids"]
+
+
+def test_few_shot_inject_is_labeled_example_without_conversation_id():
+    normalized = normalize_genie_route_plan(
+        {
+            "a": {"question": "Top 10 drugs by total cost. Limit 10 rows"},
+            "b": {
+                "question": "Diagnoses associated with the provided drug IDs. Limit 10 rows",
+                "depends_on": ["a"],
+                "inject": ["few_shot", "ids"],
+            },
+        }
+    )
+    packages = {
+        "a": build_context_package(
+            "a",
+            {
+                "success": True,
+                "question": "Top 10 drugs by total cost. Limit 10 rows",
+                "answer": "Top drug is 'D001'",
+                "sql": "SELECT drug_code, SUM(cost) AS total_cost FROM claims "
+                "WHERE year = 2024 GROUP BY drug_code",
+                "conversation_id": "conv-a-must-not-appear",
+            },
+        )
+    }
+    enriched = enrich_question_with_context(normalized["b"], packages)
+    assert enriched.startswith("Diagnoses associated with the provided drug IDs")
+    assert "FEW-SHOT FROM UPSTREAM SPACE a" in enriched
+    assert "Q: Top 10 drugs by total cost. Limit 10 rows" in enriched
+    assert "SELECT drug_code" in enriched
+    assert "D001" in enriched
+    assert "Now answer THIS question in YOUR tables" in enriched
+    assert "conv-a-must-not-appear" not in enriched
+    assert "conversation_id" not in enriched
+
+
+def test_few_shot_failed_upstream_does_not_invent_keys():
+    step = {
+        "question": "Look up descriptions",
+        "depends_on": ["a"],
+        "inject": ["few_shot"],
+    }
+    packages = {
+        "a": build_context_package(
+            "a",
+            {"success": False, "error": "timeout", "question": "Find codes"},
+        )
+    }
+    block = format_inject_block(step, packages)
+    assert "FAILED (timeout)" in block
+    assert "Do not invent keys" in block
+
+
+def test_wave_runner_injects_few_shot_into_dependent_question():
+    normalized = normalize_genie_route_plan(
+        {
+            "space_drugs": {
+                "question": "Top 10 drugs by total cost. Limit 10 rows",
+                "depends_on": [],
+                "inject": ["few_shot", "ids"],
+            },
+            "space_dx": {
+                "question": "Diagnoses for those drugs. Limit 10 rows",
+                "depends_on": ["space_drugs"],
+                "inject": ["few_shot", "ids"],
+            },
+        }
+    )
+    waves = compute_execution_waves(normalized)
+    assert waves == [["space_drugs"], ["space_dx"]]
+
+    packages = {}
+    wave1 = questions_for_wave(waves[0], normalized, packages)
+    assert wave1["space_drugs"] == "Top 10 drugs by total cost. Limit 10 rows"
+
+    fake_results = {
+        "space_drugs": {
+            "success": True,
+            "question": wave1["space_drugs"],
+            "answer": "Top codes are 'D001' and 'D002'",
+            "sql": "SELECT drug_code FROM claims WHERE year = 2024",
+            "conversation_id": "conv-drugs",
+        }
+    }
+    packages.update(build_context_packages(fake_results))
+    wave2 = questions_for_wave(waves[1], normalized, packages)
+    dependent_q = wave2["space_dx"]
+    assert "Diagnoses for those drugs" in dependent_q
+    assert "FEW-SHOT FROM UPSTREAM SPACE space_drugs" in dependent_q
+    assert "Q: Top 10 drugs by total cost. Limit 10 rows" in dependent_q
+    assert "D001" in dependent_q
+    assert "conv-drugs" not in dependent_q
+    # Nested inject must not become the recorded upstream question.
+    assert packages["space_drugs"]["question"] == (
+        "Top 10 drugs by total cost. Limit 10 rows"
     )
